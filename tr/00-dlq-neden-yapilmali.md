@@ -6,7 +6,7 @@
 | Durum | İncelemede |
 | Oluşturulma | 2026-07-08 |
 | Son güncelleme | 2026-07-09 |
-| Kapsam | `/Users/benanaktas/project/home-office/test1` içindeki `cmd-adaptor-sns` projesi |
+| Kapsam | `cmd-adaptor-sns` modülü |
 | Etiketler | kafka, retry, dlq, error-handling, no-silent-loss, data-integrity |
 
 ---
@@ -38,6 +38,8 @@
 | `cmd-adaptor-sns/src/main/resources/application.yml` | Giriş topic'leri `landing-1` ve `landing-413`; DLQ topic/property tanımı yok. |
 | `cmd-adaptor-sns/src/main/resources/application.yml` | Dynatrace/Prometheus altyapısı var, fakat DLQ/retry metric'i yok. |
 | `cmd-adaptor-sns-integration-tests/pom.xml` | Entegrasyon testi docker-compose profilleriyle çalışıyor; Testcontainers bağımlılığı görünmüyor. |
+
+> **Not:** Bu dokümandaki kod referansları FDP deposu içindeki `cmd-adaptor-sns` modülünü göstermektedir. Yerel checkout yapınıza göre yolları ayarlayın.
 
 Bu belge SNS adaptörü için doğrulanmış bulgulara dayanır. Diğer FDP adaptörleri aynı pattern'i kullanıyor olabilir, fakat bu dokümanda ayrıca doğrulanmadıkları için rollout kapsamına "validasyon sonrası" alınmalıdır.
 
@@ -159,20 +161,7 @@ Davranış değiştirmeden kanıt topla.
 
 #### Phase Gate / Decision Checklist
 
-- [ ] Listener success durumunda offset commit davranışı doğrulandı.
-- [ ] Listener exception durumunda offset commit davranışı doğrulandı.
-- [ ] Retry exhausted durumunda offset commit davranışı doğrulandı.
-- [ ] DLQ publish success durumunda offset commit davranışı doğrulandı.
-- [ ] DLQ publish failure durumunda offset commit davranışı doğrulandı.
-- [ ] CDLZ cluster vs adaptor cluster sorumlulukları netleştirildi.
-- [ ] `fdp-commons` içinde `ErrorHandlingDeserializer` konfigürasyonu doğrulandı.
-- [ ] DLQ `KafkaTemplate`'in adaptor cluster'ına değil CDLZ cluster'ına yazacağı doğrulandı.
-- [ ] DLQ serializer desteği hem `GenericRecord` hem `CdlzLandingRecord` için doğrulandı.
-- [ ] EORI idempotency, duplicate ve partial-success davranışı karara bağlandı.
-- [ ] Retryable vs non-retryable exception taxonomy'si onaylandı.
-- [ ] Alert ownership ve operasyonel response ownership tanımlandı.
-- [ ] Topic provisioning, retention, ACL ve schema registry konfigürasyonu onaylandı.
-- [ ] EORI Faz 1'e dahil mi, yoksa idempotency netleşene kadar sadece dokümante mi edilecek kararı verildi.
+Faz Gate'in tam checklist'ini [Teknik Analiz](01-teknik-analiz.md#phase-gate--decision-checklist) belgesinde bulabilirsiniz. Gate bir duraklama noktasıdır; tüm maddeler doğrulanmadan Faz 1 başlamamalıdır.
 
 Çıkış kriteri: error taxonomy, offset commit kararı, DLQ cluster kararı ve EORI idempotency kararı dokümante edilmiş olmalı.
 
@@ -272,3 +261,18 @@ SNS pilot başarılı olduktan sonra pattern ortak hale getirilebilir.
 - [Teknik Analiz](01-teknik-analiz.md)
 - [Uygulama Kılavuzu](02-uygulama-kilavuzu.md)
 - [Runbook](03-runbook.md)
+
+---
+
+## Sözlük
+
+| Terim | Tanım |
+|-------|-------|
+| DLQ | Dead Letter Queue: retry sonrası işlenemeyen mesajların depolandığı özel topic |
+| CDLZ cluster | `cmd-adaptor-sns` tarafından tüketilen source topic'lerin bulunduğu Kafka cluster'ı (broker: `FDP_APP_CDL_KAFKA_BROKER`) |
+| Adaptor cluster | `cmd-adaptor-sns`'in kendi output topic'leri için kullandığı Kafka cluster'ı (broker: `FDP_KAFKA_BROKER`) |
+| Blocking retry | Aynı kaydı tekrar denerken partition'ı bloke eden consumer retry |
+| Non-retryable | Ek retry olmadan doğrudan DLQ'ye gitmesi gereken exception |
+| ErrorHandlingDeserializer | Deserialization hatalarını yakalayan ve error handler'a yönlendiren Kafka deserializer sarmalayıcısı |
+| DefaultErrorHandler | Retry ve dead-letter publishing desteği sunan Spring Kafka dahili error handler'ı |
+| DeadLetterPublishingRecoverer | Başarısız kayıtları DLQ topic'ine yayınlayan Spring Kafka recoverer'ı |

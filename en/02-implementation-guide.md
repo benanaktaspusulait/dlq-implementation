@@ -6,6 +6,8 @@
 
 The examples in this guide are **illustrative candidate implementation** only after Phase 0 discovery decisions are approved. The goal is not immediate platform-wide retry/DLQ standardisation; it is the lowest-complexity, reversible path for the **No Silent Loss SNS Pilot**.
 
+> **Note:** Adjust module paths (`cmd-adaptor-sns/src/main/...`) according to your local checkout structure.
+
 - Confirm DLQ topic names with the platform team.
 - Verify Avro serializer settings for `GenericRecord` and `CdlzLandingRecord` on the DLQ producer.
 - Confirm that the listener error handler is not overridden by existing `fdp-commons` Kafka configuration.

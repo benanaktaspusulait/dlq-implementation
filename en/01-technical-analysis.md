@@ -4,7 +4,9 @@
 
 ## Scope
 
-This analysis covers the SNS command adaptor in `/Users/benanaktas/project/home-office/test1`. The main reviewed module is `cmd-adaptor-sns`; the related integration-test module is `cmd-adaptor-sns-integration-tests`.
+This analysis covers the SNS command adaptor within the FDP repository. The main reviewed module is `cmd-adaptor-sns`; the related integration-test module is `cmd-adaptor-sns-integration-tests`.
+
+> **Note:** Adjust module paths according to your local checkout structure.
 
 Other FDP adaptors should only be included after their code patterns have been verified. This analysis supports discovery and a controlled pilot to reduce **silent loss**, rather than an immediate coding task.
 
@@ -181,6 +183,31 @@ Phase 0 should not close until this checklist is complete:
 | ADR-005 | Do not automate replay until dry-run, RBAC, audit, rate limiting, and duplicate handling exist. |
 | ADR-006 | EORI replay requires an idempotency/duplicate strategy. |
 | ADR-007 | Confirm `ErrorHandlingDeserializer` for deserialization/schema DLQ behaviour. |
+
+### ADR Template
+
+Each ADR should follow this structure:
+
+```markdown
+# ADR-NNN: <Title>
+
+## Status
+Proposed | Accepted | Deprecated | Superseded by ADR-XXX
+
+## Context
+What is the issue that motivates this decision?
+
+## Decision
+What is the change being proposed?
+
+## Consequences
+What are the positive and negative outcomes?
+
+## Alternatives Considered
+What other options were evaluated?
+```
+
+Store ADRs in the repository at `docs/adr/` or the team's agreed location.
 
 ---
 
@@ -379,6 +406,41 @@ Operational ownership matters as much as the metric:
 1. Disable the new behavior with `app.dlq.enabled=false`.
 2. Evaluate the listener exception-propagation change separately in the rollback plan; reverting to the old behavior reintroduces data-loss risk.
 3. Do not delete DLQ topics; their records may be needed for incident review and recovery.
+
+---
+
+## Security Considerations
+
+DLQ records contain the original message payload, which may include sensitive data. The following must be addressed:
+
+| Area | Requirement |
+|------|-------------|
+| Data classification | Confirm what PII/sensitive fields may appear in DLQ payloads |
+| Encryption at rest | DLQ topics must use the same encryption-at-rest policy as source topics |
+| Access control | DLQ topic ACLs should be restricted to: application (produce), triage/operations (consume), reprocessor service (consume) |
+| Retention alignment | DLQ retention must comply with data retention policy; do not retain sensitive data longer than required |
+| Audit trail | Console-consumer access to DLQ topics must be logged for audit purposes |
+
+---
+
+## Disaster Recovery
+
+| Scenario | Impact | Mitigation |
+|----------|--------|------------|
+| DLQ topic becomes unavailable | DLQ publish fails; `fdp.dlq.publish.failure.total` alert fires | Monitor DLQ publish failure as critical; ensure topic replication factor ≥ 2 in non-local environments |
+| CDLZ cluster outage | Consumer cannot read; DLQ cannot be written | This is a source cluster issue, not DLQ-specific; follow CDLZ incident procedure |
+| Schema registry outage | Deserialization failures increase; may hit DLQ fast-path | Ensure schema registry has HA configuration; monitor `SerializationException` rate |
+
+---
+
+## Capacity Planning
+
+| Factor | Guidance |
+|--------|----------|
+| DLQ partition count | Match source topic partition count; use partition `-1` in recoverer to avoid mismatch errors |
+| DLQ retention | Set to cover incident investigation window (recommend ≥ 7 days); align with data retention policy |
+| DLQ storage growth | Monitor `fdp.dlq.messages.total` to forecast storage needs; alert on sustained DLQ growth |
+| Expected DLQ rate | In steady state, DLQ count should be 0; any sustained DLQ messages indicate a systemic issue requiring investigation |
 
 ---
 

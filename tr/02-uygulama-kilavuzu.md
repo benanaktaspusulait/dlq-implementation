@@ -6,6 +6,8 @@
 
 Bu kılavuzdaki kod örnekleri **Faz 0 discovery kararları onaylandıktan sonra** değerlendirilecek illustrative candidate implementation örnekleridir. Amaç, hemen tam platform retry/DLQ standardı kurmak değil, önce **No Silent Loss SNS Pilot** için en düşük karmaşıklıklı ve geri alınabilir yaklaşımı netleştirmektir.
 
+> **Not:** Modül yollarını (`cmd-adaptor-sns/src/main/...`) yerel checkout yapınıza göre ayarlayın.
+
 - DLQ topic isimleri platform ekibiyle netleştirilmeli.
 - DLQ producer'ın Avro serializer ayarları `GenericRecord` ve `CdlzLandingRecord` için doğrulanmalı.
 - Listener error handler'ın mevcut `fdp-commons` Kafka configuration tarafından ezilmediği kontrol edilmeli.

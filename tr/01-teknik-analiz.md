@@ -4,7 +4,9 @@
 
 ## Kapsam
 
-Bu analiz `/Users/benanaktas/project/home-office/test1` projesindeki SNS command adaptor için hazırlanmıştır. İncelenen ana modül `cmd-adaptor-sns`, ilgili entegrasyon test modülü ise `cmd-adaptor-sns-integration-tests`tir.
+Bu analiz FDP deposu içindeki SNS command adaptor için hazırlanmıştır. İncelenen ana modül `cmd-adaptor-sns`, ilgili entegrasyon test modülü ise `cmd-adaptor-sns-integration-tests`tir.
+
+> **Not:** Modül yollarını yerel checkout yapınıza göre ayarlayın.
 
 Diğer FDP adaptörleri için aynı öneri ancak kod pattern'i doğrulandıktan sonra genelleştirilmelidir. Bu analiz, immediate coding task değil, **silent loss** riskini azaltmaya yönelik discovery ve kontrollü pilot kararlarını destekler.
 
@@ -181,6 +183,31 @@ Faz 0 aşağıdaki checklist tamamlanmadan kapanmış sayılmamalıdır:
 | ADR-005 | Dry-run, RBAC, audit, rate limit ve duplicate handling olmadan automated replay yapılmaz. |
 | ADR-006 | EORI replay için idempotency/duplicate stratejisi prerequisite'tir. |
 | ADR-007 | Deserialization/schema hatalarının DLQ davranışı için `ErrorHandlingDeserializer` doğrulanır. |
+
+### ADR Şablonu
+
+Her ADR aşağıdaki yapıyı izlemelidir:
+
+```markdown
+# ADR-NNN: <Başlık>
+
+## Durum
+Önerildi | Onaylandı | Kullanımdan kaldırıldı | ADR-XXX ile değiştirildi
+
+## Bağlam
+Bu kararı tetikleyen sorun nedir?
+
+## Karar
+Önerilen değişiklik nedir?
+
+## Sonuçlar
+Olumlu ve olumsuz sonuçlar nelerdir?
+
+## Alternatifler
+Hangi diğer seçenekler değerlendirildi?
+```
+
+ADR'leri depoda `docs/adr/` veya ekibin kararlaştırdığı konumda saklayın.
 
 ---
 
@@ -379,6 +406,41 @@ Operasyonel sahiplik de metric kadar önemlidir:
 1. `app.dlq.enabled=false` ile yeni error handler davranışını kapat.
 2. Listener değişikliğinin exception propagation etkisini rollback planında ayrıca değerlendir; eski davranışa dönmek veri kaybı riskini geri getirir.
 3. DLQ topic'lerini silme; içlerindeki kayıtlar incident/audit için korunmalıdır.
+
+---
+
+## Güvenlik Hususları
+
+DLQ kayıtları orijinal mesaj payload'ını içerir; hassas veri içerebilir. Aşağıdakiler ele alınmalıdır:
+
+| Alan | Gereklilik |
+|------|------------|
+| Veri sınıflandırması | DLQ payload'larında hangi PII/hassas alanların bulunabileceği doğrulanmalı |
+| Rest'te şifreleme | DLQ topic'leri, source topic'ler ile aynı rest'te şifreleme politikasını kullanmalıdır |
+| Erişim kontrolü | DLQ topic ACL'leri yalnızca şunlara kısıtlı olmalıdır: uygulama (produce), triage/operasyon (consume), reprocessor servisi (consume) |
+| Retention uyumu | DLQ retention, veri saklama politikasıyla uyumlu olmalı; hassas veri gerekenden uzun süre tutulmamalıdır |
+| Audit trail | DLQ topic'lerine console-consumer erişimi audit için loglanmalıdır |
+
+---
+
+## Felaket Kurtarma
+
+| Senaryo | Etki | Azaltma |
+|---------|------|---------|
+| DLQ topic kullanılamaz hale gelir | DLQ publish başarısız olur; `fdp.dlq.publish.failure.total` alert'i tetiklenir | DLQ publish failure'ı kritik olarak izle; production ortamında topic replication factor ≥ 2 olmasını sağla |
+| CDLZ cluster kesintisi | Consumer okuyamaz; DLQ'ye yazamaz | Bu kaynak cluster sorunudur, DLQ'ye özgü değil; CDLZ incident prosedürünü takip et |
+| Schema registry kesintisi | Deserialization hataları artar; DLQ fast-path'e düşebilir | Schema registry'nin HA konfigürasyonu olduğundan emin ol; `SerializationException` hızını izle |
+
+---
+
+## Kapasite Planlama
+
+| Faktör | Rehber |
+|--------|--------|
+| DLQ partition sayısı | Source topic partition sayısıyla eşleşmeli; recoverer'da partition `-1` kullanarak uyumsuzluk hatalarını önle |
+| DLQ retention | Incident inceleme süresini karşılayacak şekilde ayarla (≥ 7 gün önerilir); veri saklama politikasıyla uyumlu olmalı |
+| DLQ depolama büyümesi | `fdp.dlq.messages.total` izleyerek depolama ihtiyacını öngör; sürdürülen DLQ artışında uyarı ver |
+| Beklenen DLQ hızı | Steady state'te DLQ count 0 olmalıdır; sürekli DLQ mesajları sistematik bir sorun olduğunu gösterir |
 
 ---
 

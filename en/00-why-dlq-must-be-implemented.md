@@ -6,7 +6,7 @@
 | Status | In Review |
 | Created | 2026-07-08 |
 | Last updated | 2026-07-09 |
-| Scope | `cmd-adaptor-sns` in `/Users/benanaktas/project/home-office/test1` |
+| Scope | `cmd-adaptor-sns` module |
 | Labels | kafka, retry, dlq, error-handling, no-silent-loss, data-integrity |
 
 ---
@@ -38,6 +38,8 @@
 | `cmd-adaptor-sns/src/main/resources/application.yml` | Input topics are `landing-1` and `landing-413`; there is no DLQ topic/property. |
 | `cmd-adaptor-sns/src/main/resources/application.yml` | Dynatrace/Prometheus infrastructure exists, but there are no DLQ/retry metrics. |
 | `cmd-adaptor-sns-integration-tests/pom.xml` | Integration tests run through docker-compose profiles; no Testcontainers dependency was found. |
+
+> **Note:** Code references in this document point to the `cmd-adaptor-sns` module within the FDP repository. Adjust paths according to your local checkout.
 
 This document is based on findings verified for the SNS adaptor. Other FDP adaptors may use the same pattern, but they should be validated before being included in a wider rollout.
 
@@ -159,20 +161,7 @@ Collect evidence without changing runtime behavior.
 
 #### Phase Gate / Decision Checklist
 
-- [ ] Offset commit semantics are confirmed for listener success.
-- [ ] Offset commit semantics are confirmed for listener exception.
-- [ ] Offset commit semantics are confirmed for retry exhausted.
-- [ ] Offset commit semantics are confirmed for DLQ publish success.
-- [ ] Offset commit semantics are confirmed for DLQ publish failure.
-- [ ] CDLZ cluster vs adaptor cluster responsibilities are confirmed.
-- [ ] `ErrorHandlingDeserializer` configuration is confirmed in `fdp-commons`.
-- [ ] The DLQ `KafkaTemplate` is confirmed to target the CDLZ cluster, not the adaptor cluster.
-- [ ] Serializer support for both `GenericRecord` and `CdlzLandingRecord` is confirmed.
-- [ ] EORI idempotency, duplicate, and partial-success behaviour is agreed.
-- [ ] Retryable vs non-retryable exception taxonomy is approved.
-- [ ] Alert ownership and operational response ownership are agreed.
-- [ ] Topic provisioning, retention, ACL, and schema registry configuration are approved.
-- [ ] Decision is made whether EORI is included in Phase 1 or documented only until idempotency is agreed.
+See the full Phase Gate checklist in [Technical Analysis](01-technical-analysis.md#phase-gate--decision-checklist). The gate is a hard stop: Phase 1 must not begin until all items are confirmed.
 
 Exit criteria: error taxonomy, offset commit decision, DLQ cluster decision, and EORI idempotency decision are documented.
 
@@ -272,3 +261,18 @@ Exit criteria: this is no longer an SNS-specific fix but a repeatable FDP adapto
 - [Technical Analysis](01-technical-analysis.md)
 - [Implementation Guide](02-implementation-guide.md)
 - [Runbook](03-runbook.md)
+
+---
+
+## Glossary
+
+| Term | Definition |
+|------|------------|
+| DLQ | Dead Letter Queue: a dedicated topic where messages that cannot be processed after retries are stored |
+| CDLZ cluster | The Kafka cluster hosting source topics consumed by `cmd-adaptor-sns` (broker: `FDP_APP_CDL_KAFKA_BROKER`) |
+| Adaptor cluster | The Kafka cluster used by `cmd-adaptor-sns` for its own output topics (broker: `FDP_KAFKA_BROKER`) |
+| Blocking retry | Consumer retry that holds the partition while retrying the same record |
+| Non-retryable | An exception that should immediately go to DLQ without further retry attempts |
+| ErrorHandlingDeserializer | A Kafka deserializer wrapper that catches deserialization failures and routes them to the error handler |
+| DefaultErrorHandler | Spring Kafka's built-in error handler that supports retry and dead-letter publishing |
+| DeadLetterPublishingRecoverer | A Spring Kafka recoverer that publishes failed records to a DLQ topic |
