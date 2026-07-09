@@ -97,7 +97,9 @@ app:
 
 ---
 
-## Önerilen Konfigürasyon
+## Aday Konfigürasyon Şekli
+
+Bu konfigürasyon şekli illustratiftir ve uygulamadan önce Faz 0 kararlarına, ortam konvansiyonlarına ve mevcut `fdp-commons` Kafka konfigürasyonuna göre doğrulanmalıdır.
 
 ```yaml
 app:

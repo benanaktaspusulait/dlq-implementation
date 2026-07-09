@@ -257,7 +257,7 @@ Kontrol listesi:
 ## Geri Alma
 
 1. `app.dlq.enabled=false` ile DLQ davranışını kapat.
-2. Retry config'i de eski haline alınmalı veya `max-retries=0` ile etkisizleştirilmelidir.
+2. Retry konfigürasyonu `DlqConfig` dışında ayrıca bağlıysa devre dışı bırakılmalı veya geri alınmalıdır; örneğin desteklenen yerlerde `max-retries=0` ayarı yapılabilir.
 3. Yeni listener exception propagation davranışı rollback planında açıkça değerlendirilmeli; eski pattern'e dönmek veri kaybı riskini geri getirir.
 4. DLQ topic'leri ve mesajları silinmemelidir.
 

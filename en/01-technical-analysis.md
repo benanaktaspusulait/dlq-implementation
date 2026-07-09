@@ -97,7 +97,9 @@ Important correction: the DLQ should be designed around the input topics consume
 
 ---
 
-## Proposed Configuration
+## Candidate Configuration Shape
+
+This configuration shape is illustrative and should be confirmed against Phase 0 decisions, environment conventions, and existing `fdp-commons` Kafka configuration before implementation.
 
 ```yaml
 app:

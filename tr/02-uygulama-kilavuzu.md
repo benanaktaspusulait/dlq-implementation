@@ -274,6 +274,7 @@ SIT/UAT/PROD için:
 - Partition sayısı source topic ile uyumlu olmalı.
 - Retention en az incident inceleme süresini karşılamalı.
 - ACL'ler command adaptor'ın DLQ topic'e produce etmesine ve operasyon/reprocessor'ın consume etmesine izin vermeli.
+- DLQ partition sayısı source topic ile eşleştirilemiyorsa recoverer orijinal source partition'a sabitlenmemelidir. Producer partitioner'ın geçerli bir DLQ partition seçmesi için partition `-1` kullanılmalıdır. Orijinal partition'a sabitleme yalnızca DLQ topic'in kaynak topic kadar partition'a sahip olduğu garanti edildiğinde güvenlidir.
 
 ---
 

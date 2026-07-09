@@ -257,7 +257,7 @@ Checklist:
 ## Rollback
 
 1. Disable DLQ behavior with `app.dlq.enabled=false`.
-2. Retry config should also be reverted or disabled with `max-retries=0`.
+2. If retry configuration is separately wired outside `DlqConfig`, disable or revert it explicitly, for example by setting `max-retries=0` where supported.
 3. Evaluate the new listener exception-propagation behavior explicitly; reverting to the old pattern reintroduces data-loss risk.
 4. Do not delete DLQ topics or messages.
 

@@ -64,7 +64,9 @@ This document is based on findings verified for the SNS adaptor. Other FDP adapt
 
 ---
 
-## Why DLQ?
+## Why Retry/DLQ Failure Handling?
+
+The purpose of this recommendation is not simply to add a DLQ topic. The purpose is to make failed records visible, recoverable where appropriate, and operationally owned through retry, classification, DLQ preservation, metrics, alerts, and controlled replay governance.
 
 ### Data Loss Prevention
 
@@ -153,7 +155,7 @@ This phase is a hard gate. Do not start Phase 1 implementation until these decis
 
 Collect evidence without changing runtime behavior.
 
-- [ ] Confirm offset commit semantics for success, retry exhausted, DLQ publish success, and DLQ publish failure.
+- [ ] Confirm offset commit semantics for listener success, listener exception, retry exhausted, DLQ publish success, and DLQ publish failure.
 - [ ] Confirm the CDLZ cluster vs adaptor cluster split; decide where DLQ topics and the DLQ `KafkaTemplate` live.
 - [ ] Verify whether the CDLZ consumer factory uses `ErrorHandlingDeserializer`.
 - [ ] Analyze EORI partial-success and duplicate impact.
@@ -253,6 +255,30 @@ Exit criteria: this is no longer an SNS-specific fix but a repeatable FDP adapto
 | ADR-005 | Do not automate replay until dry-run, RBAC, audit, rate limiting, and duplicate handling exist. |
 | ADR-006 | EORI replay requires an idempotency/duplicate strategy before enablement. |
 | ADR-007 | `ErrorHandlingDeserializer` must be confirmed for schema/deserialization DLQ behaviour. |
+
+---
+
+## Review Readiness
+
+This pack is ready for technical review when:
+
+- The evidence has been checked against the latest `cmd-adaptor-sns` code.
+- Phase 0 questions are agreed as the first task scope.
+- EORI is treated separately unless idempotency and duplicate handling are approved.
+- Implementation examples are understood as candidate patterns, not approved code changes.
+- Operational ownership for alerting, DLQ triage, and replay approval is identified.
+
+---
+
+## Suggested Task Split
+
+| Task | Purpose |
+|------|---------|
+| T4.0 Failure Handling Discovery | Confirm current listener/error-handler behaviour, offset commit semantics, cluster split, deserializer behaviour, and exception taxonomy. |
+| T4.1 SNS No Silent Loss Pilot | Apply the lowest-risk SNS listener changes only after Phase 0 decisions are complete. |
+| T4.2 DLQ Monitoring and Runbook | Add metrics, alerts, dashboards, incident template, and operational ownership. |
+| T4.3 EORI Idempotency Assessment | Assess duplicate/partial-success risk before applying retry/DLQ or replay behaviour to EORI. |
+| T4.4 Replay Governance | Define dry-run, RBAC, audit, rate limiting, approval, and duplicate handling before any reprocessor is built. |
 
 ---
 

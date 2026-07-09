@@ -64,7 +64,9 @@ Bu belge SNS adaptörü için doğrulanmış bulgulara dayanır. Diğer FDP adap
 
 ---
 
-## Neden DLQ?
+## Neden Retry/DLQ Failure Handling?
+
+Bu önerinin amacı sadece DLQ topic'i eklemek değildir. Amaç, başarısız kayıtları görünür, uygun yerlerde geri kazanılabilir ve retry, sınıflandırma, DLQ koruma, metric, alert ve kontrollü replay governance ile operasyon sahipliği altına almaktır.
 
 ### Veri Kaybını Önleme
 
@@ -153,7 +155,7 @@ Bu faz hard gate'tir. Aşağıdaki kararlar dokümante edilmeden Faz 1 implement
 
 Davranış değiştirmeden kanıt topla.
 
-- [ ] Offset commit semantiğini doğrula: başarı, retry exhausted, DLQ publish success/failure durumlarında offset ne oluyor?
+- [ ] Offset commit semantiğini doğrula: listener success, listener exception, retry exhausted, DLQ publish success/failure durumlarında offset ne oluyor?
 - [ ] CDLZ cluster vs adaptor cluster ayrımını netleştir; DLQ topic ve `KafkaTemplate` hangi cluster'da olacak?
 - [ ] CDLZ consumer factory'nin `ErrorHandlingDeserializer` kullanıp kullanmadığını doğrula.
 - [ ] EORI akışında partial success ve duplicate etkisini analiz et.
@@ -253,6 +255,30 @@ SNS pilot başarılı olduktan sonra pattern ortak hale getirilebilir.
 | ADR-005 | Dry-run, RBAC, audit, rate limit ve duplicate handling olmadan automated replay yapılmaz. |
 | ADR-006 | EORI replay, idempotency/duplicate stratejisi netleşmeden enable edilmez. |
 | ADR-007 | Schema/deserialization DLQ davranışı için `ErrorHandlingDeserializer` doğrulanmalıdır. |
+
+---
+
+## İnceleme Hazırlığı
+
+Bu paket teknik incelemeye hazır olduğunda:
+
+- Kanıtlar en son `cmd-adaptor-sns` koduyla doğrulanmış olmalıdır.
+- Faz 0 soruları ilk görev kapsamı olarak karara bağlanmış olmalıdır.
+- EORI, idempotency ve duplicate handling onaylanmadıkça ayrı ele alınmalıdır.
+- Uygulama örnekleri onaylı kod değişiklikleri değil, aday pattern'ler olarak anlaşılmalıdır.
+- Alerting, DLQ triage ve replay onayı için operasyon sahipliği belirlenmiş olmalıdır.
+
+---
+
+## Önerilen Görev Bölümü
+
+| Görev | Amaç |
+|-------|------|
+| T4.0 Failure Handling Discovery | Mevcut listener/error-handler davranışı, offset commit semantiği, cluster ayrımı, deserializer davranışı ve exception taxonomy'sini doğrula. |
+| T4.1 SNS No Silent Loss Pilot | Faz 0 kararları tamamlandıktan sonra en düşük riskli SNS listener değişikliklerini uygula. |
+| T4.2 DLQ Monitoring ve Runbook | Metric, alert, dashboard, incident şablonu ve operasyon sahipliği ekle. |
+| T4.3 EORI Idempotency Değerlendirmesi | Retry/DLQ veya replay davranışını EORI'ye uygulamadan önce duplicate/partial-success riskini değerlendir. |
+| T4.4 Replay Governance | Herhangi bir reprocessor yazmadan dry-run, RBAC, audit, rate limiting, onay ve duplicate handling tanımla. |
 
 ---
 

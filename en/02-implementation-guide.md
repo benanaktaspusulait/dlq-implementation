@@ -274,6 +274,7 @@ For SIT/UAT/PROD:
 - Partition count should match the source topic where possible.
 - Retention should cover the incident investigation window.
 - ACLs must allow the command adaptor to produce to the DLQ topic and operations/reprocessor tooling to consume from it.
+- If DLQ partition counts cannot be matched to the source topic, the recoverer must not pin to the original source partition. Use partition `-1` so the producer partitioner selects a valid DLQ partition. Pinning to the original partition is only safe when the DLQ topic is guaranteed to have at least the same partition count as the source topic.
 
 ---
 
