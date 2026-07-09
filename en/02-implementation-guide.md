@@ -177,6 +177,7 @@ Warnings:
 - Disabling DLQ does not automatically revert listener exception propagation.
 - Check whether the project Spring Kafka version returns `CompletableFuture` or `ListenableFuture` before applying `.get()` examples.
 - Blocking on `.get()` is a deliberate Phase 1 trade-off, not a universal producer pattern.
+- **Version-dependent enhancements:** If supported by the project's Spring Kafka / Spring Framework version, consider enabling retry jitter (`backOff.setJitter(0.2)`) and delivery-attempt headers (`handler.setDeliveryAttemptHeader(true)`). Verify method availability before implementation. Jitter can reduce synchronized retry spikes, and delivery-attempt headers can improve DLQ triage and dashboarding, but the pack should not assume these APIs are available without checking the dependency version.
 
 ---
 

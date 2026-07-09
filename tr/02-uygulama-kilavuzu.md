@@ -177,6 +177,7 @@ Uyarılar:
 - DLQ'yi devre dışı bırakmak, listener exception propagation değişikliğini otomatik geri almaz.
 - `.get()` örnekleri uygulanmadan önce kullanılan Spring Kafka versiyonunda `KafkaTemplate.send()` dönüş tipinin `CompletableFuture` mı `ListenableFuture` mı olduğu kontrol edilmelidir.
 - `.get()` ile blocking yapmak Faz 1 için bilinçli bir trade-off'tur; tüm producer akışları için evrensel pattern olarak kopyalanmamalıdır.
+- **Versiyona bağlı geliştirmeler:** Projenin Spring Kafka / Spring Framework versiyonu tarafından destekleniyorsa retry jitter (`backOff.setJitter(0.2)`) ve delivery-attempt header'ları (`handler.setDeliveryAttemptHeader(true)`) etkinleştirmeyi değerlendirin. Uygulamadan önce method uygunluğunu doğrulayın. Jitter senkronize retry spike'larını azaltabilir, delivery-attempt header'ları DLQ triage ve dashboard'ları iyileştirebilir; ancak paket bu API'lerin bağımlılık versiyonu kontrol edilmeden mevcut olduğunu varsaymamalıdır.
 
 ---
 

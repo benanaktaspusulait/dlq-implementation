@@ -59,9 +59,20 @@ In Phase 1, a DLQ message does not mean "replay immediately"; first confirm root
 | Metric | Normal | Warning | Critical |
 |--------|--------|---------|----------|
 | `fdp.dlq.messages.total` | 0 | > 0 in 5 minutes | > 10 in 5 minutes |
+| `fdp.dlq.messages.rate` | 0% of source topic rate | > 0.001% of source rate | > 0.01% of source rate |
 | `fdp.kafka.listener.retry.total` | Low/variable | Sudden increase | Sustained increase |
 | `fdp.kafka.listener.retry.exhausted.total` | 0 | > 0 in 5 minutes | > 10 in 5 minutes |
 | `fdp.dlq.publish.failure.total` | 0 | > 0 | > 0 |
+
+**Ratio-based alerting:** Absolute thresholds (e.g. "> 10") may not suit all topics. A topic processing 10M messages/day with 10 DLQ records is very different from a topic processing 100 messages/day with 10 DLQ records. The ratio metric `fdp.dlq.messages.rate` compares DLQ count against source topic throughput. Configure the alert as:
+
+```
+DLQ rate = fdp.dlq.messages.total / fdp.source.topic.messages.total * 100
+Warning: DLQ rate > 0.001%
+Critical: DLQ rate > 0.01%
+```
+
+If Dynatrace/Prometheus does not support ratio metrics directly, use a composite alert: absolute DLQ count > threshold AND source topic rate > minimum threshold.
 
 ### First Checks
 
@@ -194,6 +205,33 @@ A DLQ message does not automatically mean replay is safe. For EORI in particular
 3. Use an approved replay script or platform procedure.
 4. Run a dry-run and record-count check before replay.
 5. After replay, verify DLQ count and normal output topics.
+
+### Manual Single-Record Replay Before Phase 4
+
+Manual replay must not be performed through ad-hoc console commands in production unless an approved operational procedure explicitly defines:
+
+- who is allowed to perform replay
+- which source topic, partition, offset, and key are in scope
+- which headers must be preserved, removed, or rewritten
+- how sensitive payloads are handled
+- how replay is audited
+- how success and duplicate impact are verified
+
+Header handling must be confirmed during Phase 4 replay governance. Spring/Kafka internal headers and DLQ/error headers should not be blindly copied back to the source topic.
+
+For local or non-production investigation, console commands may be useful to inspect records, but production replay should use an approved replay script or platform procedure with dry-run, audit logging, rate limiting, and explicit header handling.
+
+> **Local/non-production illustration only** — not an approved production replay procedure:
+>
+> ```bash
+> # Inspect a DLQ record (local investigation only)
+> kafka-console-consumer.sh \
+>   --topic landing-1-dlq \
+>   --property print.headers=true \
+>   --property print.key=true \
+>   --max-messages 1 \
+>   --bootstrap-server kafka:29092
+> ```
 
 ### If a Reprocessor Has Been Built
 

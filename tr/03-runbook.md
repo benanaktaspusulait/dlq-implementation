@@ -59,9 +59,20 @@ Faz 1'de bir DLQ mesajı oluşursa doğru aksiyon hemen replay yapmak değildir;
 | Metric | Normal | Uyarı | Kritik |
 |--------|--------|-------|--------|
 | `fdp.dlq.messages.total` | 0 | 5 dakikada > 0 | 5 dakikada > 10 |
+| `fdp.dlq.messages.rate` | Kaynak topic hızının %0'ı | Kaynak hızının > %0.001'i | Kaynak hızının > %0.01'i |
 | `fdp.kafka.listener.retry.total` | Düşük/değişken | Ani artış | Sürekli artış |
 | `fdp.kafka.listener.retry.exhausted.total` | 0 | 5 dakikada > 0 | 5 dakikada > 10 |
 | `fdp.dlq.publish.failure.total` | 0 | > 0 | > 0 |
+
+**Orana dayalı alerting:** Mutlak eşik değerleri (ör. "> 10") her topic için uygun olmayabilir. Günde 10M mesaj işleyen bir topic'te 10 DLQ kaydı ile günde 100 mesaj işleyen bir topic'te 10 DLQ kaydı çok farklıdır. `fdp.dlq.messages.rate` metriği DLQ sayısını source topic throughput'uyla karşılaştırır. Alert'i şu şekilde yapılandırın:
+
+```
+DLQ rate = fdp.dlq.messages.total / fdp.source.topic.messages.total * 100
+Uyarı: DLQ rate > %0.001
+Kritik: DLQ rate > %0.01
+```
+
+Dynatrace/Prometheus orana dayalı metric desteklemiyorsa composite alert kullanın: mutlak DLQ sayısı > eşik DEĞİL source topic hızı > minimum eşik.
 
 ### İlk Kontroller
 
@@ -194,6 +205,33 @@ DLQ mesajı olması replay yapılacağı anlamına gelmez. Özellikle EORI için
 3. Replay için onaylı script veya platform prosedürü kullan.
 4. Replay öncesi dry-run ve kayıt sayısı kontrolü yap.
 5. Replay sonrası DLQ count ve normal output topic'lerini doğrula.
+
+### Manuel Tek-Kayıt Replay Faz 4 Öncesinde
+
+Production'da ad-hoc console komutlarıyla manuel replay yapılmamalıdır; yalnızca onaylı operasyon prosedürü açıkça tanımladığında yapılmalıdır:
+
+- replay'i kimin yapabileceği
+- hangi source topic, partition, offset ve key kapsamda
+- hangi header'ların korunması, kaldırılması veya yeniden yazılması gerektiği
+- hassas payload'ların nasıl ele alındığı
+- replay'in nasıl audit edildiği
+- başarı ve duplicate etkisinin nasıl doğrulandığı
+
+Header işlenmesi Faz 4 replay governance sırasında onaylanmalıdır. Spring/Kafka internal header'ları ve DLQ/hata header'ları source topic'e körükörüne kopyalanmamalıdır.
+
+Yerel veya production-dışı调查 için console komutları kayıtları incelemekte faydalı olabilir; ancak production replay dry-run, audit logging, rate limiting ve açık header işleme ile onaylı bir replay scripti veya platform prosedürüyle yapılmalıdır.
+
+> **Yalnızca yerel/production-dışı gösterim** — onaylı bir production replay prosedürü değildir:
+>
+> ```bash
+> # DLQ kaydını inceleyin (yalnızca yerel调查)
+> kafka-console-consumer.sh \
+>   --topic landing-1-dlq \
+>   --property print.headers=true \
+>   --property print.key=true \
+>   --max-messages 1 \
+>   --bootstrap-server kafka:29092
+> ```
 
 ### Reprocessor Geliştirildiyse
 

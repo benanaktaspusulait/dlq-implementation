@@ -13,12 +13,15 @@
 
 ## Executive Summary
 
-- **Current risk:** listener-level `try/catch + log.error` in `cmd-adaptor-sns` may allow failed records to be treated as consumed.
-- **Current risk:** async `KafkaTemplate.send()` results may not surface producer acknowledgement failures.
-- **Current gap:** there is no recoverable failed-record destination and no retry/DLQ telemetry or alert ownership.
-- **Recommendation:** complete Phase 0 discovery before implementation; confirm offset commit, cluster, serializer, deserializer, exception taxonomy, and operational ownership decisions first.
-- **First delivery objective:** deliver a **No Silent Loss SNS Pilot**, not full platform retry/DLQ standardisation.
-- **Scope note:** this is verified for `cmd-adaptor-sns` only; other FDP adaptors require separate validation.
+| # | Item | Detail |
+|---|------|--------|
+| 1 | **Current risk: silent loss** | Listener-level `try/catch + log.error` in `cmd-adaptor-sns` may allow failed records to be treated as consumed. |
+| 2 | **Current risk: async send** | Async `KafkaTemplate.send()` results are not awaited; producer acknowledgement failures may not surface. |
+| 3 | **Current gap** | There is no recoverable failed-record destination and no retry/DLQ telemetry or alert ownership. |
+| 4 | **Recommendation** | Complete Phase 0 discovery before implementation; confirm offset commit, cluster, serializer, deserializer, exception taxonomy, and operational ownership decisions first. |
+| 5 | **First delivery objective** | Deliver a **No Silent Loss SNS Pilot**, not full platform retry/DLQ standardisation. |
+| 6 | **Scope note** | This is verified for `cmd-adaptor-sns` only; other FDP adaptors require separate validation. |
+| 7 | **Future scope** | After the SNS pilot succeeds, the same pattern can be assessed for other FDP adaptors that are verified to share similar listener failure-handling risks. Platform standardisation remains Phase 5 and should not proceed without adaptor-level validation. |
 
 ## Key Message
 

@@ -162,12 +162,15 @@ This sequence captures the critical safety gain in Phase 1 while delaying riskie
 
 Phase 0 should not close until this checklist is complete:
 
+> **RED FLAG - Must-Do Before Coding:**
+> The DLQ `KafkaTemplate` must target the **CDLZ** cluster (`FDP_APP_CDL_KAFKA_BROKER`), not the adaptor cluster. If this bean is wired to the wrong cluster, the DLQ path may appear to work technically while failed records are written to a cluster where operations cannot find, monitor, or replay them. This would undermine the recovery and operational-visibility objectives of the design. Verify this bean wiring as the **first** Phase 0 item.
+
+- [ ] **CDLZ cluster DLQ bean wiring is verified** (red flag - wrong cluster undermines recovery and operational visibility).
 - [ ] Offset commit semantics are confirmed for listener success, listener exception, retry exhausted, DLQ publish success, and DLQ publish failure.
 - [ ] CDLZ cluster and adaptor cluster responsibilities are written down.
-- [ ] `ErrorHandlingDeserializer` and schema/deserialization failure behaviour are confirmed in `fdp-commons`.
-- [ ] The DLQ `KafkaTemplate` is confirmed to target the **CDLZ** cluster.
+- [ ] **`ErrorHandlingDeserializer` dependency on `fdp-commons` is resolved.** The `fdp-commons` `ConsumerFactory` must wrap Avro key/value deserializers in `ErrorHandlingDeserializer`. Without this, deserialization/schema failures stall the poll loop and never reach `DefaultErrorHandler` or DLQ. A PR to `fdp-commons` may be required; confirm ownership and timeline with the commons team. This is a Phase 0 exit criterion - Phase 1 cannot proceed without it.
 - [ ] The DLQ producer serializer supports both `GenericRecord` and `CdlzLandingRecord`.
-- [ ] EORI idempotency, duplicate, and partial-success behaviour is agreed.
+- [ ] EORI idempotency strategy is agreed (see EORI Idempotency section below).
 - [ ] Retryable/non-retryable exception taxonomy is approved.
 - [ ] Alert owner, DLQ triage owner, replay approver, and first-response SLA are defined.
 - [ ] DLQ topic provisioning, retention, ACL, and schema registry configuration are approved.
@@ -245,6 +248,25 @@ EORI is a separate risk area:
 - If some output sends succeed before a later failure, retrying the original input can create duplicates.
 - DLQ replay can duplicate lookup records unless output keys, idempotency, and downstream duplicate semantics are understood.
 - The SNS source listener is therefore the lower-risk first **No Silent Loss** pilot; include EORI in Phase 1 only after its idempotency/duplicate strategy is approved.
+
+#### EORI Idempotency Strategy Options
+
+Before EORI can be included in Phase 1, one of the following idempotency strategies must be agreed:
+
+| Candidate strategy | How it could help | Trade-off / decision needed |
+|-------------------|-------------------|-----------------------------|
+| Composite key | Use `landingRecordId + eoriNumber` as the Kafka message key to support stable partitioning and downstream idempotency checks. | Kafka does not deduplicate; downstream must use the key explicitly. Confirm key availability and consumer behaviour. |
+| Idempotent producer | Enable producer idempotence to reduce duplicate sends within producer sessions. | Does not solve replay duplicates or duplicates across producer sessions by itself. Confirm Spring/Kafka producer config. |
+| Downstream dedup store | Consumer checks Redis, DB unique constraint, or another store before processing. | Adds dependency and operational ownership; may be strongest for replay safety. |
+| Transactional outbox | Persist intended output with unique constraint and publish from an outbox. | Heavier design; only justified if EORI duplicate risk and volume require it. |
+
+**Initial candidate to assess:** use a composite key such as `landingRecordId + eoriNumber` if the downstream consumer can use it for idempotency, ordering, or deduplication. If downstream consumers are not key-aware, assess a downstream dedup store, unique constraint, or another duplicate-control mechanism. The final strategy should be confirmed during Phase 0 after downstream consumer semantics are understood.
+
+```java
+// Example: composite key for EORI
+String key = record.getLandingRecordId() + ":" + eoriRecord.getEoriNumber();
+kafkaTemplate.send(lookupTopic, key, toLookupEoriValue(record, eoriRecord));
+```
 
 ```java
 @KafkaListener(

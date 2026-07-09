@@ -13,12 +13,15 @@
 
 ## Executive Summary
 
-- **Mevcut risk:** `cmd-adaptor-sns` listener'larında `try/catch + log.error` pattern'i var; bu, başarısız kayıtların başarılı tüketilmiş gibi commit edilmesine yol açabilir.
-- **Mevcut risk:** `KafkaTemplate.send()` async çalışıyor; send sonucu beklenmediğinde producer acknowledgement hataları listener'a dönmeyebilir.
-- **Mevcut boşluk:** Recover edilebilir failed-record destination yok; retry/DLQ telemetry ve alert ownership tanımlı değil.
-- **Öneri:** Kod değişikliğine geçmeden önce Faz 0 discovery zorunlu tamamlanmalı; offset commit, cluster, serializer, deserializer, exception taxonomy ve operasyon sahipliği doğrulanmalıdır.
-- **İlk teslim hedefi:** Tam platform standardizasyonu değil, **No Silent Loss SNS Pilot** olmalıdır.
-- **Kapsam uyarısı:** Bu bulgular `cmd-adaptor-sns` için doğrulanmıştır; diğer FDP adaptörleri ayrıca validate edilmeden rollout kapsamına alınmamalıdır.
+| # | Madde | Detay |
+|---|------|-------|
+| 1 | **Mevcut risk: sessiz kayıp** | `cmd-adaptor-sns` listener'larında `try/catch + log.error` pattern'i var; bu, başarısız kayıtların başarılı tüketilmiş gibi commit edilmesine yol açabilir. |
+| 2 | **Mevcut risk: async send** | `KafkaTemplate.send()` async çalışıyor ve sonucu beklenmiyor; producer acknowledgement hataları listener'a dönmeyebilir. |
+| 3 | **Mevcut boşluk** | Recover edilebilir failed-record destination yok; retry/DLQ telemetry ve alert ownership tanımlı değil. |
+| 4 | **Öneri** | Kod değişikliğine geçmeden önce Faz 0 discovery zorunlu tamamlanmalı; offset commit, cluster, serializer, deserializer, exception taxonomy ve operasyon sahipliği doğrulanmalıdır. |
+| 5 | **İlk teslim hedefi** | Tam platform standardizasyonu değil, **No Silent Loss SNS Pilot** olmalıdır. |
+| 6 | **Kapsam uyarısı** | Bu bulgular `cmd-adaptor-sns` için doğrulanmıştır; diğer FDP adaptörleri ayrıca validate edilmeden rollout kapsamına alınmamalıdır. |
+| 7 | **Gelecek kapsam** | SNS pilotu başarılı olduktan sonra aynı pattern, benzer listener failure-handling riskleri doğrulanmış diğer FDP adaptörleri için de değerlendirilebilir. Platform standardizasyonu Faz 5'te kalır ve adaptör düzeyinde doğrulama olmadan ilerlememelidir. |
 
 ## Ana Mesaj
 

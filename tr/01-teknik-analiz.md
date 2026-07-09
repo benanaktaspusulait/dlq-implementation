@@ -162,12 +162,15 @@ Bu sıralama, kritik güvenlik kazanımını Faz 1'de alırken daha riskli otoma
 
 Faz 0 aşağıdaki checklist tamamlanmadan kapanmış sayılmamalıdır:
 
+> **KIRMIZI BAYRAK - Kodlamadan Önce Yapılması Zorunlu:**
+> DLQ `KafkaTemplate`'i **CDLZ** cluster'ına (`FDP_APP_CDL_KAFKA_BROKER`) bağlı olmalıdır, adaptör cluster'ına değil. Bu bean yanlış cluster'a bağlanırsa DLQ yolu teknik olarak çalış gibi görünse bile başarısız kayıtlar operasyonların bulamayacağı, izleyemeyeceği veya yeniden oynatamayacağı bir cluster'a yazılır. Bu durum design'ın recovery ve operasyonel görünürlük hedeflerini zedeler. Bu bean wiring'ini Faz 0'da **ilk** madde olarak doğrulayın.
+
+- [ ] **CDLZ cluster DLQ bean wiring'i doğrulandı** (kırmızı bayrak - yanlış cluster recovery ve operasyonel görünürlüğü zedeler).
 - [ ] Listener success, listener exception, retry exhausted, DLQ publish success ve DLQ publish failure durumlarında offset commit semantiği doğrulandı.
 - [ ] CDLZ cluster ve adaptor cluster sorumlulukları yazılı hale getirildi.
-- [ ] `fdp-commons` içinde `ErrorHandlingDeserializer` varlığı ve schema/deserialization hata davranışı doğrulandı.
-- [ ] DLQ `KafkaTemplate`'in **CDLZ** cluster'ını hedefleyeceği doğrulandı.
+- [ ] **`fdp-commons` üzerindeki `ErrorHandlingDeserializer` bağımlılığı çözüldü.** `fdp-commons` `ConsumerFactory`'si Avro key/value deserializer'larını `ErrorHandlingDeserializer` ile sarmalmalıdır. Bu olmadan deserialization/schema hataları poll döngüsünü kırar ve `DefaultErrorHandler`'a ya da DLQ'ye hiç ulaşmaz. `fdp-commons`'a PR gerekebilir; commons ekibiyle sahiplik ve zaman çizelgesini doğrulayın. Bu bir Faz 0 çıkış kriteridir - Faz 1 bunun olmadan ilerleyemez.
 - [ ] DLQ producer serializer'ının `GenericRecord` ve `CdlzLandingRecord` payload'larını desteklediği test edildi.
-- [ ] EORI idempotency, duplicate ve partial-success davranışı karara bağlandı.
+- [ ] EORI idempotency stratejisi karara bağlandı (aşağıdaki EORI Idempotency bölümüne bakın).
 - [ ] Retryable/non-retryable exception taxonomy'si ekipçe onaylandı.
 - [ ] Alert owner, DLQ triage owner, replay approver ve first-response SLA belirlendi.
 - [ ] DLQ topic provisioning, retention, ACL ve schema registry konfigürasyonu onaylandı.
@@ -245,6 +248,25 @@ EORI ayrıca ayrı risk alanıdır:
 - Bazı output send'ler başarılı olduktan sonra hata alınırsa original input retry edildiğinde duplicate oluşabilir.
 - DLQ'den replay, output key/idempotency/downstream duplicate semantics anlaşılmadan lookup kayıtlarını tekrar üretebilir.
 - Bu nedenle SNS source listener, ilk **No Silent Loss** pilot için daha düşük riskli adaydır; EORI Faz 1'e dahil edilecekse idempotency/duplicate stratejisi önce onaylanmalıdır.
+
+#### EORI Idempotency Stratejisi Seçenekleri
+
+EORI Faz 1'e dahil edilmeden önce aşağıdaki idempotency stratejilerinden biri karara bağlanmalıdır:
+
+| Aday strateji | Nasıl yardımcı olabilir | Trade-off / karar gerektiren |
+|---------------|------------------------|------------------------------|
+| Composite key | `landingRecordId + eoriNumber` Kafka message key olarak kullanarak stabil partitioning ve downstream idempotency kontrollerini destekler. | Kafka deduplikasyon yapmaz; downstream key'i açıkça kullanmalıdır. Key uygunluğu ve consumer davranışı doğrulanmalıdır. |
+| Idempotent producer | Producer idempotence'ini etkinleştirerek producer session'ları içindeki duplicate send'leri azaltır. | Replay duplicate'lerini veya producer session'ları arası duplicate'leri tek başına çözmez. Spring/Kafka producer config'i doğrulanmalıdır. |
+| Downstream dedup store | Consumer işlemeden önce Redis, DB unique constraint veya başka bir store kontrolü yapar. | Bağımlılık ve operasyonel sahiplik ekler; replay güvenliği için en güçlü seçenek olabilir. |
+| Transactional outbox | Unique constraint ile çıktıyı persist eder ve outbox'tan publish eder. | Daha ağır tasarım; yalnızca EORI duplicate riski ve hacmi gerektiriyorsa haklı gösterilebilir. |
+
+**Değerlendirilecek ilk aday:** downstream consumer key'i idempotency, ordering veya deduplikasyon için kullanabiliyorsa `landingRecordId + eoriNumber` gibi bir composite key değerlendirin. Downstream consumer'lar key-aware değilse downstream dedup store, unique constraint veya başka bir duplicate kontrol mekanizması değerlendirin. Nihai strateji, Faz 0'da downstream consumer семantikleri anlaşıldıktan sonra onaylanmalıdır.
+
+```java
+// Örnek: EORI için composite key
+String key = record.getLandingRecordId() + ":" + eoriRecord.getEoriNumber();
+kafkaTemplate.send(lookupTopic, key, toLookupEoriValue(record, eoriRecord));
+```
 
 ```java
 @KafkaListener(
