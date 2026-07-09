@@ -1,4 +1,4 @@
-# Dead Letter Queue (DLQ) Recommendation: Why It Should Be Implemented
+# Kafka Retry and Dead Letter Queue (DLQ) Recommendation
 
 | Field | Value |
 |-------|-------|
@@ -14,8 +14,8 @@
 ## Key Message
 
 1. Kafka listener failures in `cmd-adaptor-sns` are caught in application code and only logged.
-2. That disables the Spring Kafka retry/error-handler path; failed records are not written to a recoverable location.
-3. DLQ, retry, metrics, and a runbook should be implemented together to reduce data-loss risk and improve operational visibility.
+2. That disables the Spring Kafka retry/error-handler path; transient failures are not retried.
+3. The recommendation is not DLQ only: short Kafka consumer retry, failure classification, optional retry topics, and DLQ as the final destination should be designed together.
 
 ---
 
@@ -44,10 +44,11 @@ This document is based on findings verified for the SNS adaptor. Other FDP adapt
 | # | Observation | Impact | Recommendation | Confidence |
 |---|-------------|--------|----------------|------------|
 | 1 | Listener-level `try/catch + log.error` | Failed records may be committed and lost | Do not swallow errors; let Spring Kafka handle them | High |
-| 2 | No DLQ topic/property | Failed records are not recoverable | Define DLQ topics for consumed input topics | High |
+| 2 | No Kafka retry policy | Transient failures become data-loss/manual-recovery risks | Define retryable and non-retryable exceptions | High |
 | 3 | Producer send result is not awaited | Async send failures may not reach retry/DLQ | Await sends or propagate failures to the listener thread | High |
-| 4 | No DLQ metric/alert | Operations can only discover failures through logs | Add DLQ and retry metrics | High |
-| 5 | No reprocessing workflow | Recovery remains manual and risky | Start with manual procedure; add controlled reprocessor later | Medium |
+| 4 | No DLQ topic/property | Records still failing after max retries are not recoverable | Define DLQ topics for consumed input topics | High |
+| 5 | No DLQ/retry metric or alert | Operations can only discover failures through logs | Add DLQ and retry metrics | High |
+| 6 | No reprocessing workflow | Recovery remains manual and risky | Start with manual procedure; add controlled reprocessor later | Medium |
 
 ---
 
@@ -64,10 +65,14 @@ Kafka record -> Listener -> Failure -> log.error -> record may complete as consu
 Target flow:
 
 ```text
-Kafka record -> Listener -> exception propagates -> retry -> still failing -> DLQ -> metric/alert
+Kafka record -> Listener -> exception propagates -> Kafka retry -> still failing -> DLQ -> metric/alert
 ```
 
 A DLQ preserves the failed record with the original payload and failure metadata. The failed record becomes inspectable, recoverable, and replayable under controlled conditions.
+
+### Why Kafka Retry Must Be Designed Separately
+
+DLQ is the final stop; transient failures should first be handled by Kafka consumer retry. Short broker, schema registry, network, or downstream availability problems may recover after a few retry attempts. Broken payloads, schema incompatibility, and permanent business validation failures should not be retried indefinitely and should move quickly to DLQ.
 
 ### Operational Visibility
 
@@ -86,9 +91,20 @@ If DLQ records include original topic, partition, offset, timestamp, exception t
 
 ## Recommended Solution
 
-**Primary recommendation:** Spring Kafka `DefaultErrorHandler` + `DeadLetterPublishingRecoverer` + enriched DLQ metadata.
+**Primary recommendation:** bounded consumer retry with Spring Kafka `DefaultErrorHandler` + DLQ with `DeadLetterPublishingRecoverer` + enriched metadata.
 
 This uses Spring Kafka listener retry and recovery behavior without building a fully custom error-handling framework. The project-specific critical fix is that the current listener `try/catch` blocks must stop swallowing failures and producer send failures must be surfaced back to the listener thread.
+
+### Retry Policy
+
+| Failure type | Action | Rationale |
+|--------------|--------|-----------|
+| Temporary Kafka/Schema Registry/network failure | Retry with exponential backoff | Short outages can recover without creating DLQ records |
+| Serialization/schema incompatibility | No retry or minimal retry, then DLQ | Retrying the same payload will not fix it |
+| Permanent business validation failure | DLQ | Requires data or code correction |
+| Long downstream outage | Consider retry-topic pattern | Long blocking retries can hold a partition unnecessarily |
+
+For the first pilot, use short blocking retry. If total backoff would stretch into minutes, design a Spring Kafka retry-topic pattern (`retry-1m`, `retry-5m`, then DLQ) separately.
 
 ### DLQ Topic Rule
 
@@ -107,8 +123,8 @@ If the platform does not allow runtime suffix conventions, provide explicit `app
 
 | Option | Description | Pros | Cons |
 |--------|-------------|------|------|
-| A | `DefaultErrorHandler` + DLQ only | Fastest pilot, minimal code | Metadata/metrics may be limited |
-| B | `DefaultErrorHandler` + explicit DLQ resolver + metadata + metrics | Recommended balance; supports audit and alerting | Slightly more configuration/testing |
+| A | Blocking retry + `DefaultErrorHandler` + DLQ | Fastest pilot, minimal code | Can hold a partition during longer outages |
+| B | Blocking retry + explicit DLQ resolver + metadata + metrics | Recommended first phase; supports audit and alerting | Requires retry classification/testing |
 | C | Retry-topic pattern + DLQ | Strong for long backoff/high volume | More topics and operational complexity |
 
 ---
@@ -118,6 +134,7 @@ If the platform does not allow runtime suffix conventions, provide explicit `app
 ### Phase 1: SNS Pilot
 
 - [ ] Add DLQ configuration properties in `cmd-adaptor-sns`.
+- [ ] Define retry policy: max attempts, exponential backoff, retryable/non-retryable exception list.
 - [ ] Remove or rethrow the failure-swallowing `try/catch` pattern in `KafkaSourceListener` and `KafkaLookupEoriListener`.
 - [ ] Await producer send futures so async send failures are visible.
 - [ ] Configure retry + DLQ using `DefaultErrorHandler` and `DeadLetterPublishingRecoverer`.
@@ -144,6 +161,8 @@ If the platform does not allow runtime suffix conventions, provide explicit `app
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Listener still swallows exceptions | Error handler never runs | Add tests for try/catch removal or rethrow behavior |
+| Wrong failure is retried | Poison message can hold the same partition unnecessarily | Add non-retryable exception list and DLQ fast path |
+| Retry backoff is too long | Consumer partition is blocked and lag grows | Keep blocking retry short; use retry topics for longer waits |
 | Async send failure is not returned to the listener | Producer failure does not reach DLQ | Await the send future or propagate callback failure safely |
 | Wrong DLQ serializer | DLQ publish also fails | Add Avro serializer integration test for DLQ |
 | EORI partial output | Retry may duplicate lookup records | Define idempotent keys, transactional send, or duplicate handling |

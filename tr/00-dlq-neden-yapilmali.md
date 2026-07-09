@@ -1,4 +1,4 @@
-# Dead Letter Queue (DLQ) Önerisi: Neden Yapılmalı?
+# Kafka Retry ve Dead Letter Queue (DLQ) Önerisi
 
 | Alan | Değer |
 |------|-------|
@@ -14,8 +14,8 @@
 ## Ana Mesaj
 
 1. `cmd-adaptor-sns` içinde Kafka listener hataları uygulama kodunda yakalanıp sadece loglanıyor.
-2. Bu davranış Spring Kafka retry/error handler zincirini devre dışı bırakıyor; başarısız kayıtlar geri kazanılabilir bir yere yazılmıyor.
-3. DLQ, retry, metric ve runbook birlikte ele alınırsa veri kaybı riski azalır ve operasyonel görünürlük oluşur.
+2. Bu davranış Spring Kafka retry/error handler zincirini devre dışı bırakıyor; transient hatalar tekrar denenmiyor.
+3. Öneri sadece DLQ değildir: kısa Kafka consumer retry, hata sınıflandırması, gerekirse retry topic pattern'i ve son durak olarak DLQ birlikte tasarlanmalıdır.
 
 ---
 
@@ -44,10 +44,11 @@ Bu belge SNS adaptörü için doğrulanmış bulgulara dayanır. Diğer FDP adap
 | # | Gözlem | Etki | Öneri | Güven |
 |---|--------|------|-------|-------|
 | 1 | Listener seviyesinde `try/catch + log.error` var | Başarısız kayıt commit edilebilir ve kaybolabilir | Hataları yutma; Spring Kafka error handler'a bırak | Yüksek |
-| 2 | DLQ topic/property yok | Başarısız kayıtlar geri kazanılamaz | Tüketilen giriş topic'leri için DLQ tanımla | Yüksek |
+| 2 | Kafka retry politikası yok | Geçici hatalar doğrudan kayıp/manuel recovery riskine döner | Retryable ve non-retryable exception ayrımı yap | Yüksek |
 | 3 | Producer send sonucu beklenmiyor | Async send hataları retry/DLQ akışına girmeyebilir | Send future'larını bekle veya hatayı listener thread'ine taşı | Yüksek |
-| 4 | DLQ metric/alert yok | Hata ancak log aramasıyla bulunur | DLQ ve retry metric'leri ekle | Yüksek |
-| 5 | Reprocessing akışı yok | Recovery manuel ve riskli kalır | İlk fazda manuel prosedür, sonraki fazda kontrollü reprocessor | Orta |
+| 4 | DLQ topic/property yok | Maksimum retry sonrası başarısız kayıtlar geri kazanılamaz | Tüketilen giriş topic'leri için DLQ tanımla | Yüksek |
+| 5 | DLQ/retry metric ve alert yok | Hata ancak log aramasıyla bulunur | DLQ ve retry metric'leri ekle | Yüksek |
+| 6 | Reprocessing akışı yok | Recovery manuel ve riskli kalır | İlk fazda manuel prosedür, sonraki fazda kontrollü reprocessor | Orta |
 
 ---
 
@@ -64,10 +65,14 @@ Kafka kaydı -> Listener -> Hata -> log.error -> kayıt başarıyla tüketilmiş
 Hedef akış:
 
 ```text
-Kafka kaydı -> Listener -> Hata dışarı fırlatılır -> retry -> hala başarısızsa DLQ -> metric/alert
+Kafka kaydı -> Listener -> Hata dışarı fırlatılır -> Kafka retry -> hala başarısızsa DLQ -> metric/alert
 ```
 
 DLQ, hatalı kaydı orijinal payload ve hata metadata'sı ile korur. Bu sayede kayıt yeniden üretilebilen, incelenebilen ve kontrollü şekilde tekrar işlenebilen bir artefakt olur.
+
+### Kafka Retry Neden Ayrı Tasarlanmalı?
+
+DLQ son çaredir; transient hatalar önce Kafka consumer retry ile çözülmeye çalışılmalıdır. Örneğin kısa süreli broker, schema registry, network veya downstream erişim problemleri birkaç retry içinde toparlanabilir. Buna karşılık bozuk payload, schema uyumsuzluğu veya kalıcı business validation hataları tekrar denenmemeli, hızlıca DLQ'ye alınmalıdır.
 
 ### Operasyonel Görünürlük
 
@@ -86,9 +91,20 @@ DLQ; original topic, partition, offset, timestamp, exception type ve error messa
 
 ## Önerilen Çözüm
 
-**Birincil öneri:** Spring Kafka `DefaultErrorHandler` + `DeadLetterPublishingRecoverer` + zenginleştirilmiş DLQ metadata.
+**Birincil öneri:** Spring Kafka `DefaultErrorHandler` ile sınırlı consumer retry + `DeadLetterPublishingRecoverer` ile DLQ + zenginleştirilmiş metadata.
 
 Bu seçenek custom bir hata altyapısı yazmadan Spring Kafka'nın listener retry ve recoverer davranışını kullanır. Proje özelinde kritik nokta, mevcut listener `try/catch` bloklarının hatayı yutmaması ve producer send hatalarının listener thread'ine taşınmasıdır.
+
+### Retry Politikası
+
+| Hata tipi | Aksiyon | Gerekçe |
+|-----------|---------|---------|
+| Geçici Kafka/Schema Registry/network hatası | Exponential backoff ile retry | Kısa süreli kesintiler DLQ üretmeden toparlanabilir |
+| Serialization/schema uyumsuzluğu | Retry yapmadan veya az retry sonrası DLQ | Aynı payload tekrar denenince düzelmez |
+| Kalıcı business validation hatası | DLQ | Veri veya kod düzeltmesi gerekir |
+| Uzun süreli downstream kesinti | Retry topic pattern'i değerlendir | Uzun blocking retry partition'ı gereksiz bekletebilir |
+
+İlk pilot için kısa blocking retry önerilir. Backoff toplamı dakikaları aşacaksa Spring Kafka retry topic pattern'i (`retry-1m`, `retry-5m`, sonrasında DLQ gibi) ayrı tasarlanmalıdır.
 
 ### DLQ Topic Kuralı
 
@@ -107,9 +123,9 @@ Eğer platform topic isimlerinde suffix kullanımına izin vermiyorsa `app.dlq.t
 
 | Seçenek | Açıklama | Artı | Eksi |
 |---------|----------|------|------|
-| A | Sadece `DefaultErrorHandler` + DLQ | En hızlı pilot, az kod | Metadata/metric sınırlı kalabilir |
-| B | `DefaultErrorHandler` + explicit DLQ resolver + metadata + metric | Önerilen denge; audit ve alert destekler | Biraz daha fazla konfigürasyon/test gerekir |
-| C | Retry topic pattern + DLQ | Uzun backoff ve yüksek hacim için güçlü | Daha fazla topic, daha fazla operasyonel karmaşıklık |
+| A | Blocking retry + `DefaultErrorHandler` + DLQ | En hızlı pilot, az kod | Uzun kesintilerde partition bekleyebilir |
+| B | Blocking retry + explicit DLQ resolver + metadata + metric | Önerilen ilk faz; audit ve alert destekler | Retry sınıflandırması/test gerekir |
+| C | Retry topic pattern + DLQ | Uzun backoff ve yüksek hacim için güçlü | Daha fazla topic ve operasyonel karmaşıklık |
 
 ---
 
@@ -118,6 +134,7 @@ Eğer platform topic isimlerinde suffix kullanımına izin vermiyorsa `app.dlq.t
 ### Faz 1: SNS Pilot
 
 - [ ] `cmd-adaptor-sns` içinde DLQ configuration property'lerini ekle.
+- [ ] Retry policy tanımla: max attempt, exponential backoff, retryable/non-retryable exception listesi.
 - [ ] `KafkaSourceListener` ve `KafkaLookupEoriListener` içindeki hata yutan `try/catch` pattern'ini kaldır veya rethrow edecek şekilde değiştir.
 - [ ] Producer send future'larını bekleyerek async send hatalarını görünür yap.
 - [ ] `DefaultErrorHandler` ve `DeadLetterPublishingRecoverer` ile retry + DLQ davranışını konfigüre et.
@@ -144,6 +161,8 @@ Eğer platform topic isimlerinde suffix kullanımına izin vermiyorsa `app.dlq.t
 | Risk | Etki | Azaltma |
 |------|------|---------|
 | Listener exception'ı yutmaya devam eder | Error handler çalışmaz | Try/catch kaldırma/rethrow için test yaz |
+| Yanlış hata retry edilir | Poison message aynı partition'ı gereksiz bekletir | Non-retryable exception listesi ve DLQ fast-path ekle |
+| Retry backoff çok uzun olur | Consumer partition'ı bloklanır, lag artar | Kısa blocking retry; uzun bekleme için retry topic pattern'i |
 | Async send hatası listener'a dönmez | Producer hatası DLQ'ye düşmez | Send future'ını bekle veya callback hatasını kontrollü taşı |
 | DLQ serializer yanlış olur | DLQ publish de başarısız olur | DLQ için Avro serializer entegrasyon testi ekle |
 | EORI partial output oluşur | Retry duplicate kayıt üretebilir | Idempotent key, transactional send veya duplicate handling stratejisi belirle |

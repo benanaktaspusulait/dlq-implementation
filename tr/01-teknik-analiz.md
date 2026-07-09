@@ -1,4 +1,4 @@
-# DLQ Teknik Analiz: `cmd-adaptor-sns`
+# Kafka Retry ve DLQ Teknik Analiz: `cmd-adaptor-sns`
 
 ---
 
@@ -23,6 +23,8 @@ CDLZ EORI topic (`landing-413`)
   -> `fdp-sns-lookup-eori`
   -> lookup state store kullanımı
 ```
+
+İki giriş topic'i (`landing-1`, `landing-413`) **CDLZ cluster**'ından (`app.cdlz-kafka`, broker `FDP_APP_CDL_KAFKA_BROKER`, group `cdlz-sns`) tüketilir; bu, output topic'lerin kullandığı adaptörün kendi `app.kafka` cluster'ından (`FDP_KAFKA_BROKER`) farklı bir cluster'dır. Bu cluster ayrımı DLQ tasarımı için kritiktir: DLQ topic'leri ve DLQ producer'ı adaptör cluster'ında değil, CDLZ cluster'ında bulunmalıdır.
 
 ---
 
@@ -100,8 +102,11 @@ app:
   dlq:
     enabled: ${FDP_DLQ_ENABLED:true}
     retry:
+      mode: ${FDP_DLQ_RETRY_MODE:blocking}
       interval-ms: ${FDP_DLQ_RETRY_INTERVAL_MS:1000}
-      max-attempts: ${FDP_DLQ_RETRY_MAX_ATTEMPTS:3}
+      max-retries: ${FDP_DLQ_RETRY_MAX_RETRIES:3}
+      multiplier: ${FDP_DLQ_RETRY_MULTIPLIER:2.0}
+      max-interval-ms: ${FDP_DLQ_RETRY_MAX_INTERVAL_MS:30000}
     topics:
       source-input: ${FDP_CMD_ADAPTOR_INCOMING_TOPIC:landing-1}
       source: ${FDP_CMD_ADAPTOR_SOURCE_DLQ_TOPIC:landing-1-dlq}
@@ -110,6 +115,29 @@ app:
 ```
 
 Platform topic provisioning explicit isim gerektiriyorsa bu property'ler environment secret/value olarak verilmelidir; runtime'da string concatenation'a güvenilmemelidir.
+
+---
+
+## Kafka Retry Tasarımı
+
+Retry, DLQ'den ayrı bir karar noktasıdır. Hedef, transient hataları DLQ üretmeden toparlamak; kalıcı veya bozuk payload hatalarını ise aynı partition'ı bekletmeden DLQ'ye almaktır.
+
+| Retry tipi | Ne zaman kullanılır | Dikkat |
+|------------|---------------------|--------|
+| Producer retry | Kafka producer'ın broker'a yazma sırasında yaşadığı geçici hatalar | Listener processing retry'nin yerine geçmez; `KafkaTemplate.send()` sonucu yine gözlenmelidir |
+| Blocking consumer retry | Kısa süreli transient processing hataları | Partition aynı kayıt üzerinde bekler; toplam backoff kısa tutulmalıdır |
+| Retry topic pattern | Dakikalar seviyesinde bekleme veya downstream outage | Ek topic, ACL, retention ve monitoring gerekir |
+| DLQ fast-path | Schema/serialization/kalıcı business validation hataları | Aynı kaydı tekrar denemek fayda sağlamaz |
+
+İlk SNS pilotu için öneri blocking consumer retry'dır: örneğin 3 retry, 1 saniye başlangıç, 2x multiplier, 30 saniye maksimum interval. Eğer toplam bekleme süresi operasyonel olarak kabul edilemeyecek kadar uzarsa veya downstream kesintileri dakikalar seviyesinde bekleniyorsa Faz 2'de retry topic pattern'i tasarlanmalıdır.
+
+Exception sınıflandırması açık olmalıdır:
+
+| Sınıf | Örnek | Aksiyon |
+|-------|-------|---------|
+| Retryable | `TimeoutException`, geçici broker/network hataları, schema registry geçici erişim hatası | Exponential backoff retry |
+| Non-retryable | Deserialization, uyumsuz schema, kalıcı payload validation hatası | DLQ fast-path |
+| İncelenecek | EORI multi-send partial failure | Idempotency/duplicate stratejisi netleşmeden agresif retry yapma |
 
 ---
 
@@ -177,16 +205,25 @@ DefaultErrorHandler kafkaErrorHandler(
         dlqKafkaTemplate,
         (record, exception) -> {
             String dlqTopic = dlqProperties.topicFor(record.topic());
-            return new TopicPartition(dlqTopic, record.partition());
+            // partition -1 producer partitioner'ın geçerli bir partition seçmesini sağlar.
+            // record.partition() sabitlemek, DLQ topic source'tan daha az partition'a
+            // sahipse hata verir. Yalnızca DLQ partition >= source partition ise sabitle.
+            return new TopicPartition(dlqTopic, -1);
         }
     );
 
-    DefaultErrorHandler errorHandler = new DefaultErrorHandler(
-        recoverer,
-        new FixedBackOff(
-            dlqProperties.retry().intervalMs(),
-            dlqProperties.retry().maxAttempts()
-        )
+    ExponentialBackOffWithMaxRetries backOff =
+        new ExponentialBackOffWithMaxRetries(dlqProperties.retry().maxRetries());
+    backOff.setInitialInterval(dlqProperties.retry().intervalMs());
+    backOff.setMultiplier(dlqProperties.retry().multiplier());
+    backOff.setMaxInterval(dlqProperties.retry().maxIntervalMs());
+
+    DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, backOff);
+
+    errorHandler.addNotRetryableExceptions(
+        org.apache.kafka.common.errors.SerializationException.class,
+        org.springframework.kafka.support.serializer.DeserializationException.class,
+        IllegalArgumentException.class
     );
 
     errorHandler.setRetryListeners((record, exception, deliveryAttempt) ->
@@ -203,8 +240,11 @@ DefaultErrorHandler kafkaErrorHandler(
 
 Notlar:
 
+- Bu bean `app.dlq.enabled`'e bağlanmalıdır (örneğin `@ConditionalOnProperty(prefix = "app.dlq", name = "enabled", havingValue = "true", matchIfMissing = true)`); aksi halde `enabled` property'si ve rollback adımı çalışmaz. Bu olmadan `app.dlq.enabled=false` ayarının runtime'da hiçbir etkisi olmaz.
 - Spring Boot auto-configuration bu `DefaultErrorHandler` bean'ini listener container factory'ye bağlamazsa mevcut factory üzerinde `setCommonErrorHandler(...)` açıkça çağrılmalıdır.
+- `dlqKafkaTemplate`, schema registry'siyle birlikte **CDLZ** cluster'ını (`app.cdlz-kafka` / `FDP_APP_CDL_KAFKA_BROKER`) hedeflemelidir; çünkü listener'lar o cluster'dan tüketir ve recoverer original consumed record'u yeniden yayınlar. Varsayılan adaptör `KafkaTemplate`'i (`app.kafka` / `FDP_KAFKA_BROKER`) kullanmak DLQ'yü yanlış cluster'a yazar.
 - DLQ producer serializer'ı hem `GenericRecord` hem `CdlzLandingRecord` payload'larını yazabilmelidir.
+- `addNotRetryableExceptions(DeserializationException.class, ...)` yalnızca consumer factory Avro deserializer'larını `ErrorHandlingDeserializer` ile sararsa işe yarar. Aksi halde deserialization/schema hataları poll döngüsünü kırar ve bu handler'a ya da DLQ'ye hiç ulaşmaz. `fdp-commons` içinde doğrulanmalıdır.
 - Spring Kafka'nın DLT header'ları kullanılmalı; gerekiyorsa proje özelinde `original-topic`, `original-partition`, `original-offset`, `error-class`, `error-message`, `failed-at` header'ları eklenmelidir.
 
 ---
@@ -234,6 +274,7 @@ Mevcut `application.yml` Dynatrace ve Prometheus endpoint altyapısını içeriy
 |--------|----------|------|
 | `fdp.dlq.messages.total` | `topic`, `source_topic`, `exception` | DLQ'ye düşen kayıt sayısı |
 | `fdp.kafka.listener.retry.total` | `topic`, `exception` | Retry deneme sayısı |
+| `fdp.kafka.listener.retry.exhausted.total` | `topic`, `exception` | Retry limiti sonrası DLQ'ye giden kayıt sayısı |
 | `fdp.dlq.publish.failure.total` | `topic`, `exception` | DLQ publish başarısızlığı |
 
 Alert başlangıç önerisi:
@@ -252,6 +293,7 @@ Alert başlangıç önerisi:
 |--------|------|
 | Unit | Listener exception'ı yutmuyor; send future failure `IllegalStateException` olarak dışarı çıkıyor. |
 | Spring context | `DefaultErrorHandler` bean'i yükleniyor ve listener factory'ye bağlanıyor. |
+| Retry policy | Retryable exception'larda retry sayısı ve backoff uygulanıyor; non-retryable exception'larda DLQ fast-path çalışıyor. |
 | Serializer | DLQ KafkaTemplate `GenericRecord` ve `CdlzLandingRecord` payload'larını serialize edebiliyor. |
 | Integration | Mevcut docker-compose profiline hatalı kayıt senaryosu ekleniyor; retry sonrası kayıt doğru DLQ topic'inde görülüyor. |
 | Regression | Başarılı kayıtlar mevcut `fdp-sns-input` ve `fdp-sns-lookup-eori` akışını bozmuyor. |

@@ -1,4 +1,4 @@
-# DLQ Implementation Guide
+# Kafka Retry and DLQ Implementation Guide
 
 ---
 
@@ -7,7 +7,10 @@
 - Confirm DLQ topic names with the platform team.
 - Verify Avro serializer settings for `GenericRecord` and `CdlzLandingRecord` on the DLQ producer.
 - Confirm that the listener error handler is not overridden by existing `fdp-commons` Kafka configuration.
+- Agree the retryable and non-retryable exception list with the team.
 - Approve the idempotency strategy for the EORI path, because replaying one failed landing record can duplicate lookup output records.
+- **Confirm which Kafka cluster the DLQ lives on.** The listeners consume the source topics from the CDLZ cluster (`app.cdlz-kafka`, `FDP_APP_CDL_KAFKA_BROKER`), which is a different cluster from the adaptor's own cluster (`app.kafka`, `FDP_KAFKA_BROKER`). The `DeadLetterPublishingRecoverer` writes the original consumed record, so the DLQ topics and the DLQ `KafkaTemplate` must use the **CDLZ** cluster bootstrap servers and schema registry, not the default adaptor producer.
+- **Confirm the consumer uses `ErrorHandlingDeserializer`.** Deserialization and incompatible-schema failures happen during the consumer poll, before the listener runs. Unless the CDLZ consumer factory (owned by `fdp-commons`) wraps the key/value Avro deserializers in `ErrorHandlingDeserializer`, those failures stall the container and never reach `DefaultErrorHandler` or the DLQ, even though they are listed below as the main non-retryable DLQ case.
 
 ---
 
@@ -20,8 +23,11 @@ app:
   dlq:
     enabled: ${FDP_DLQ_ENABLED:true}
     retry:
+      mode: ${FDP_DLQ_RETRY_MODE:blocking}
       interval-ms: ${FDP_DLQ_RETRY_INTERVAL_MS:1000}
-      max-attempts: ${FDP_DLQ_RETRY_MAX_ATTEMPTS:3}
+      max-retries: ${FDP_DLQ_RETRY_MAX_RETRIES:3}
+      multiplier: ${FDP_DLQ_RETRY_MULTIPLIER:2.0}
+      max-interval-ms: ${FDP_DLQ_RETRY_MAX_INTERVAL_MS:30000}
     topics:
       source-input: ${FDP_CMD_ADAPTOR_INCOMING_TOPIC:landing-1}
       source: ${FDP_CMD_ADAPTOR_SOURCE_DLQ_TOPIC:landing-1-dlq}
@@ -62,7 +68,12 @@ public record DlqProperties(
         return sourceTopic + "-dlq";
     }
 
-    public record Retry(long intervalMs, long maxAttempts) {}
+    public record Retry(
+            String mode,
+            long intervalMs,
+            long maxRetries,
+            double multiplier,
+            long maxIntervalMs) {}
 
     public record Topics(
             String sourceInput,
@@ -83,6 +94,7 @@ This example shows the mapping logic. In the implementation, `sourceInput` and `
 ```java
 @Configuration
 @EnableConfigurationProperties(DlqProperties.class)
+@ConditionalOnProperty(prefix = "app.dlq", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class DlqConfig {
 
     @Bean
@@ -91,18 +103,28 @@ public class DlqConfig {
             DlqProperties properties,
             MeterRegistry meterRegistry) {
 
+        // Do not pin the DLQ record to the source partition: the DLQ topic may have
+        // fewer partitions than the source, and sending to a non-existent partition
+        // fails. Return partition -1 so the producer's partitioner chooses. Only pin
+        // record.partition() if the DLQ topic is guaranteed to have >= source partitions.
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
             dlqKafkaTemplate,
             (record, exception) ->
-                new TopicPartition(properties.topicFor(record.topic()), record.partition())
+                new TopicPartition(properties.topicFor(record.topic()), -1)
         );
 
-        DefaultErrorHandler handler = new DefaultErrorHandler(
-            recoverer,
-            new FixedBackOff(
-                properties.retry().intervalMs(),
-                properties.retry().maxAttempts()
-            )
+        ExponentialBackOffWithMaxRetries backOff =
+            new ExponentialBackOffWithMaxRetries(properties.retry().maxRetries());
+        backOff.setInitialInterval(properties.retry().intervalMs());
+        backOff.setMultiplier(properties.retry().multiplier());
+        backOff.setMaxInterval(properties.retry().maxIntervalMs());
+
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
+
+        handler.addNotRetryableExceptions(
+            org.apache.kafka.common.errors.SerializationException.class,
+            org.springframework.kafka.support.serializer.DeserializationException.class,
+            IllegalArgumentException.class
         );
 
         handler.setRetryListeners((record, exception, deliveryAttempt) ->
@@ -120,9 +142,25 @@ public class DlqConfig {
 
 If the current Kafka listener container factory does not pick up this bean automatically, add `setCommonErrorHandler(kafkaErrorHandler)` to that factory configuration.
 
+`@ConditionalOnProperty` ties the bean to `app.dlq.enabled`. When it is `false` the bean is not created and the container falls back to Spring's default error handling. `dlqKafkaTemplate` must be a `KafkaTemplate` configured against the **CDLZ** cluster (see Preconditions), because that is where the consumed records and DLQ topics live.
+
 ---
 
-## 4. Update Listeners
+## 4. Clarify Retry Policy
+
+Use `mode=blocking` for the first phase. This retries briefly on the same consumer partition and sends the record to DLQ through the recoverer when retries are exhausted.
+
+Rule:
+
+- Retryable: temporary Kafka, network, schema registry access, and timeout failures.
+- Non-retryable: deserialization, incompatible schema, permanent payload/business validation failures.
+- If longer waiting is needed, do not grow blocking retry; design a Spring Kafka retry-topic pattern with separate topics and ACLs.
+
+Without this distinction, a poison message can hold the same partition repeatedly.
+
+---
+
+## 5. Update Listeners
 
 ### `KafkaSourceListener`
 
@@ -175,7 +213,7 @@ public void listen(CdlzLandingRecord cdlzLandingRecord) {
 
 ---
 
-## 5. Topic Provisioning
+## 6. Topic Provisioning
 
 Local/default topic names:
 
@@ -201,7 +239,7 @@ For SIT/UAT/PROD:
 
 ---
 
-## 6. Monitoring
+## 7. Monitoring
 
 The existing Dynatrace config lives under `management.dynatrace.metrics.export`. Publish new metrics via `MeterRegistry`:
 
@@ -219,18 +257,21 @@ Suggested alerts:
 | Alert | Condition | Severity |
 |-------|-----------|----------|
 | DLQ Messages Detected | At least 1 DLQ message in 5 minutes | Warning |
+| Retry Spike | Sudden increase in retry attempts | Warning |
 | DLQ Spike | 10+ DLQ messages in 5 minutes | Critical |
 | DLQ Publish Failure | Any DLQ publish failure | Critical |
 
 ---
 
-## 7. Tests
+## 8. Tests
 
 ### Unit Tests
 
 - `KafkaSourceListener` throws when producer send fails.
 - `KafkaLookupEoriListener` throws when any send future fails.
 - Interrupted path resets the thread interrupt flag.
+- Retryable exceptions use the expected retry count.
+- Non-retryable exceptions use DLQ fast path without waiting for retries.
 - DLQ topic resolver maps `landing-1 -> landing-1-dlq` and `landing-413 -> landing-413-dlq`.
 
 ### Integration Test
@@ -244,13 +285,15 @@ Add a failure scenario to the existing docker-compose profile:
 
 ---
 
-## 8. Rollback
+## 9. Rollback
 
 ```yaml
 app:
   dlq:
     enabled: false
 ```
+
+Setting `enabled: false` removes the `DlqConfig` bean (via `@ConditionalOnProperty`) so the custom error handler and DLQ recoverer no longer run. This does not revert the listener exception-propagation change; with the error handler gone, the container's default handling applies and reverting the listeners to swallow-and-log reintroduces the original data-loss risk. Decide both parts explicitly in the rollback plan.
 
 Do not delete DLQ topics during rollback. Their contents should be preserved for incident analysis and recovery.
 

@@ -1,10 +1,10 @@
-# DLQ Operational Runbook
+# Kafka Retry and DLQ Operational Runbook
 
 ---
 
 ## Status
 
-This runbook describes the operational procedure after the DLQ implementation is enabled. If a reprocessing API has not been built yet, do not assume API endpoints exist; manual replay must use an approved operational procedure.
+This runbook describes the operational procedure after Kafka retry and DLQ implementation is enabled. If a reprocessing API has not been built yet, do not assume API endpoints exist; manual replay must use an approved operational procedure.
 
 ---
 
@@ -13,6 +13,8 @@ This runbook describes the operational procedure after the DLQ implementation is
 | Situation | First Action | Priority |
 |-----------|--------------|----------|
 | Messages in DLQ | Check topic, exception, and deployment timing | High |
+| Retry spike | Check exception type and source topic lag | High |
+| Retry exhausted | Inspect records sent to DLQ after max retries | High |
 | DLQ publish failure | Check Kafka ACLs, serializer, and topic existence | Critical |
 | Retry count rising but no DLQ | Check listener error handler and retry config | High |
 | Reprocessed record returns to DLQ | Stop replay until root cause is fixed | High |
@@ -36,6 +38,7 @@ This runbook describes the operational procedure after the DLQ implementation is
 |--------|--------|---------|----------|
 | `fdp.dlq.messages.total` | 0 | > 0 in 5 minutes | > 10 in 5 minutes |
 | `fdp.kafka.listener.retry.total` | Low/variable | Sudden increase | Sustained increase |
+| `fdp.kafka.listener.retry.exhausted.total` | 0 | > 0 in 5 minutes | > 10 in 5 minutes |
 | `fdp.dlq.publish.failure.total` | 0 | > 0 | > 0 |
 
 ### First Checks
@@ -49,6 +52,25 @@ This runbook describes the operational procedure after the DLQ implementation is
 ---
 
 ## Alert Response
+
+### Alert: Retry Spike
+
+A retry spike is not always an incident; a transient dependency may be recovering. Still check:
+
+1. Which source topic and exception type is driving retries?
+2. Are records succeeding after retry, or is `retry.exhausted` increasing?
+3. Is consumer lag increasing?
+4. Is a non-retryable failure being retried by mistake?
+5. If total backoff is holding partitions unnecessarily, raise the need for a retry-topic pattern.
+
+### Alert: Retry Exhausted
+
+This alert means records are moving to DLQ after max retries.
+
+1. Group DLQ messages by exception type.
+2. Check for recent deploy/config/schema changes for the same exception.
+3. If the failure is transient, evaluate whether retry count/backoff is sufficient.
+4. If the failure is permanent, add a non-retryable fast path to the retry policy.
 
 ### Alert: DLQ Messages Detected
 
@@ -64,10 +86,11 @@ Treat this alert as critical because failed records may not be reaching the DLQ.
 
 Checks:
 
-- Does the DLQ topic exist?
+- Does the DLQ topic exist **on the CDLZ cluster** (`FDP_APP_CDL_KAFKA_BROKER`)?
+- Is the DLQ KafkaTemplate pointed at the CDLZ cluster and its schema registry?
 - Does the command adaptor have produce ACLs for the DLQ topic?
 - Does the DLQ KafkaTemplate serializer support the payload type?
-- Is the DLQ partition count compatible with the source topic?
+- Is the DLQ partition count compatible with the source topic (or is the recoverer using partition `-1`)?
 
 ---
 
@@ -136,9 +159,23 @@ Checklist:
 - [ ] Is the listener still swallowing exceptions?
 - [ ] Is the `KafkaTemplate.send()` future awaited?
 - [ ] Is `DefaultErrorHandler` attached to the listener container factory?
-- [ ] Does the DLQ topic exist?
+- [ ] Is `app.dlq.enabled=true`? (When `false`, the `DlqConfig` bean is not created.)
+- [ ] For deserialization/schema failures: is the consumer using `ErrorHandlingDeserializer`? Without it, these failures break the poll loop and never reach the error handler or DLQ.
+- [ ] Does the DLQ topic exist **on the CDLZ cluster** (where the source topics are consumed), not the adaptor cluster?
+- [ ] Is the DLQ `KafkaTemplate` pointed at the CDLZ cluster and its schema registry?
+- [ ] Does the DLQ topic have at least as many partitions as the source (or is the recoverer using partition `-1`)?
 - [ ] Is the DLQ producer serializer correct?
 - [ ] Is produce ACL granted?
+
+### Retry Runs Too Often
+
+Checklist:
+
+- [ ] Is the exception type really retryable?
+- [ ] Is the same payload repeatedly producing the same exception?
+- [ ] Are `max-retries`, `interval-ms`, `multiplier`, and `max-interval-ms` set as expected?
+- [ ] Is consumer lag increasing?
+- [ ] If longer waiting is needed, would a retry-topic pattern be more appropriate?
 
 ### Too Many DLQ Messages
 
@@ -162,8 +199,9 @@ Checklist:
 ## Rollback
 
 1. Disable DLQ behavior with `app.dlq.enabled=false`.
-2. Evaluate the new listener exception-propagation behavior explicitly; reverting to the old pattern reintroduces data-loss risk.
-3. Do not delete DLQ topics or messages.
+2. Retry config should also be reverted or disabled with `max-retries=0`.
+3. Evaluate the new listener exception-propagation behavior explicitly; reverting to the old pattern reintroduces data-loss risk.
+4. Do not delete DLQ topics or messages.
 
 ---
 

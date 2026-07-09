@@ -1,10 +1,10 @@
-# DLQ Operasyonel Runbook
+# Kafka Retry ve DLQ Operasyonel Runbook
 
 ---
 
 ## Durum
 
-Bu runbook, DLQ implementasyonu devreye alındıktan sonra kullanılacak operasyon prosedürünü tarif eder. Reprocessing API henüz geliştirilmediyse API endpoint'leri varmış gibi kabul edilmemelidir; manuel replay yalnızca onaylı operasyon prosedürüyle yapılmalıdır.
+Bu runbook, Kafka retry ve DLQ implementasyonu devreye alındıktan sonra kullanılacak operasyon prosedürünü tarif eder. Reprocessing API henüz geliştirilmediyse API endpoint'leri varmış gibi kabul edilmemelidir; manuel replay yalnızca onaylı operasyon prosedürüyle yapılmalıdır.
 
 ---
 
@@ -13,6 +13,8 @@ Bu runbook, DLQ implementasyonu devreye alındıktan sonra kullanılacak operasy
 | Durum | İlk Aksiyon | Öncelik |
 |-------|-------------|---------|
 | DLQ'de mesaj var | Topic, exception ve deploy zamanını kontrol et | Yüksek |
+| Retry spike var | Exception tipini ve source topic lag'ini kontrol et | Yüksek |
+| Retry exhausted var | Maksimum retry sonrası DLQ'ye giden kayıtları incele | Yüksek |
 | DLQ publish failure var | Kafka ACL/serializer/topic varlığını kontrol et | Kritik |
 | Retry artıyor ama DLQ yok | Listener error handler ve retry config'i kontrol et | Yüksek |
 | Reprocess edilen kayıt tekrar DLQ'ye düşüyor | Root cause giderilmeden replay'i durdur | Yüksek |
@@ -36,6 +38,7 @@ Bu runbook, DLQ implementasyonu devreye alındıktan sonra kullanılacak operasy
 |--------|--------|-------|--------|
 | `fdp.dlq.messages.total` | 0 | 5 dakikada > 0 | 5 dakikada > 10 |
 | `fdp.kafka.listener.retry.total` | Düşük/değişken | Ani artış | Sürekli artış |
+| `fdp.kafka.listener.retry.exhausted.total` | 0 | 5 dakikada > 0 | 5 dakikada > 10 |
 | `fdp.dlq.publish.failure.total` | 0 | > 0 | > 0 |
 
 ### İlk Kontroller
@@ -49,6 +52,25 @@ Bu runbook, DLQ implementasyonu devreye alındıktan sonra kullanılacak operasy
 ---
 
 ## Alert Yanıtlama
+
+### Alert: Retry Spike
+
+Retry artışı her zaman incident değildir; transient bir bağımlılık kısa süreli toparlanıyor olabilir. Yine de aşağıdakiler kontrol edilmelidir:
+
+1. Retry hangi source topic ve exception tipinde yoğunlaşıyor?
+2. Retry sonrası kayıtlar başarıyla işleniyor mu, yoksa `retry.exhausted` artıyor mu?
+3. Consumer lag artıyor mu?
+4. Non-retryable olması gereken bir hata yanlışlıkla retry ediliyor mu?
+5. Backoff toplamı partition'ı gereksiz bekletiyorsa retry topic pattern'i ihtiyacı aç.
+
+### Alert: Retry Exhausted
+
+Bu alert maksimum retry sonrası kayıtların DLQ'ye taşındığını gösterir.
+
+1. DLQ mesajlarını exception tipine göre grupla.
+2. Aynı exception için yeni deploy/config/schema değişikliği var mı kontrol et.
+3. Hata transient ise retry sayısı/backoff yeterli mi değerlendir.
+4. Hata kalıcı ise retry politikasına non-retryable fast-path ekle.
 
 ### Alert: DLQ Messages Detected
 
@@ -64,10 +86,11 @@ Bu alert kritik kabul edilmelidir; çünkü başarısız kayıt DLQ'ye de yazıl
 
 Kontroller:
 
-- DLQ topic gerçekten var mı?
+- DLQ topic **CDLZ cluster**'ında (`FDP_APP_CDL_KAFKA_BROKER`) gerçekten var mı?
+- DLQ KafkaTemplate CDLZ cluster'ını ve schema registry'sini hedefliyor mu?
 - Command adaptor'ın DLQ topic'e produce ACL'i var mı?
 - DLQ KafkaTemplate serializer ayarları payload tipini destekliyor mu?
-- DLQ topic partition sayısı source partition ile uyumlu mu?
+- DLQ topic partition sayısı source partition ile uyumlu mu (ya da recoverer partition `-1` mi kullanıyor)?
 
 ---
 
@@ -140,6 +163,16 @@ Kontrol listesi:
 - [ ] DLQ producer serializer doğru mu?
 - [ ] ACL produce izni var mı?
 
+### Retry Çok Fazla Çalışıyor
+
+Kontrol listesi:
+
+- [ ] Hata tipi gerçekten retryable mı?
+- [ ] Aynı payload sürekli aynı exception'ı mı üretiyor?
+- [ ] `max-retries`, `interval-ms`, `multiplier` ve `max-interval-ms` beklenen değerlerde mi?
+- [ ] Consumer lag artıyor mu?
+- [ ] Uzun bekleme gerekiyorsa retry topic pattern'i daha doğru mu?
+
 ### Çok Fazla DLQ Mesajı Var
 
 Kontrol listesi:
@@ -162,8 +195,9 @@ Kontrol listesi:
 ## Geri Alma
 
 1. `app.dlq.enabled=false` ile DLQ davranışını kapat.
-2. Yeni listener exception propagation davranışı rollback planında açıkça değerlendirilmeli; eski pattern'e dönmek veri kaybı riskini geri getirir.
-3. DLQ topic'leri ve mesajları silinmemelidir.
+2. Retry config'i de eski haline alınmalı veya `max-retries=0` ile etkisizleştirilmelidir.
+3. Yeni listener exception propagation davranışı rollback planında açıkça değerlendirilmeli; eski pattern'e dönmek veri kaybı riskini geri getirir.
+4. DLQ topic'leri ve mesajları silinmemelidir.
 
 ---
 

@@ -1,4 +1,4 @@
-# DLQ Technical Analysis: `cmd-adaptor-sns`
+# Kafka Retry and DLQ Technical Analysis: `cmd-adaptor-sns`
 
 ---
 
@@ -23,6 +23,8 @@ CDLZ EORI topic (`landing-413`)
   -> `fdp-sns-lookup-eori`
   -> lookup state-store usage
 ```
+
+The two input topics (`landing-1`, `landing-413`) are consumed from the **CDLZ cluster** (`app.cdlz-kafka`, broker `FDP_APP_CDL_KAFKA_BROKER`, group `cdlz-sns`), which is a different cluster from the adaptor's own `app.kafka` cluster (`FDP_KAFKA_BROKER`) that the output topics use. This cluster split matters for the DLQ design: the DLQ topics and DLQ producer must live on the CDLZ cluster, not the adaptor cluster.
 
 ---
 
@@ -100,8 +102,11 @@ app:
   dlq:
     enabled: ${FDP_DLQ_ENABLED:true}
     retry:
+      mode: ${FDP_DLQ_RETRY_MODE:blocking}
       interval-ms: ${FDP_DLQ_RETRY_INTERVAL_MS:1000}
-      max-attempts: ${FDP_DLQ_RETRY_MAX_ATTEMPTS:3}
+      max-retries: ${FDP_DLQ_RETRY_MAX_RETRIES:3}
+      multiplier: ${FDP_DLQ_RETRY_MULTIPLIER:2.0}
+      max-interval-ms: ${FDP_DLQ_RETRY_MAX_INTERVAL_MS:30000}
     topics:
       source-input: ${FDP_CMD_ADAPTOR_INCOMING_TOPIC:landing-1}
       source: ${FDP_CMD_ADAPTOR_SOURCE_DLQ_TOPIC:landing-1-dlq}
@@ -110,6 +115,29 @@ app:
 ```
 
 If the platform requires explicit provisioned names, provide these properties through environment values/secrets instead of relying on runtime string concatenation.
+
+---
+
+## Kafka Retry Design
+
+Retry is a separate decision point from DLQ. The goal is to recover transient failures without creating DLQ records, while sending permanent or malformed payload failures to DLQ without holding the same partition unnecessarily.
+
+| Retry type | When to use | Watch out |
+|------------|-------------|-----------|
+| Producer retry | Temporary failures while the producer writes to Kafka | Does not replace listener processing retry; the `KafkaTemplate.send()` result still has to be observed |
+| Blocking consumer retry | Short transient processing failures | The partition waits on the same record; keep total backoff short |
+| Retry-topic pattern | Minute-level delay or downstream outage | Requires extra topics, ACLs, retention, and monitoring |
+| DLQ fast path | Schema/serialization/permanent business validation failures | Retrying the same record will not help |
+
+For the first SNS pilot, use blocking consumer retry: for example 3 retries, 1 second initial interval, 2x multiplier, and 30 seconds max interval. If total wait time becomes operationally too long, or downstream outages require minute-level waiting, design a retry-topic pattern in Phase 2.
+
+Exception classification should be explicit:
+
+| Class | Example | Action |
+|-------|---------|--------|
+| Retryable | `TimeoutException`, temporary broker/network failures, temporary schema registry access failure | Exponential backoff retry |
+| Non-retryable | Deserialization, incompatible schema, permanent payload validation failure | DLQ fast path |
+| Needs review | EORI multi-send partial failure | Do not use aggressive retry until idempotency/duplicate strategy is clear |
 
 ---
 
@@ -177,16 +205,25 @@ DefaultErrorHandler kafkaErrorHandler(
         dlqKafkaTemplate,
         (record, exception) -> {
             String dlqTopic = dlqProperties.topicFor(record.topic());
-            return new TopicPartition(dlqTopic, record.partition());
+            // partition -1 lets the producer's partitioner pick a valid partition.
+            // Pinning record.partition() fails when the DLQ topic has fewer partitions
+            // than the source topic. Only pin it when DLQ partitions >= source partitions.
+            return new TopicPartition(dlqTopic, -1);
         }
     );
 
-    DefaultErrorHandler errorHandler = new DefaultErrorHandler(
-        recoverer,
-        new FixedBackOff(
-            dlqProperties.retry().intervalMs(),
-            dlqProperties.retry().maxAttempts()
-        )
+    ExponentialBackOffWithMaxRetries backOff =
+        new ExponentialBackOffWithMaxRetries(dlqProperties.retry().maxRetries());
+    backOff.setInitialInterval(dlqProperties.retry().intervalMs());
+    backOff.setMultiplier(dlqProperties.retry().multiplier());
+    backOff.setMaxInterval(dlqProperties.retry().maxIntervalMs());
+
+    DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, backOff);
+
+    errorHandler.addNotRetryableExceptions(
+        org.apache.kafka.common.errors.SerializationException.class,
+        org.springframework.kafka.support.serializer.DeserializationException.class,
+        IllegalArgumentException.class
     );
 
     errorHandler.setRetryListeners((record, exception, deliveryAttempt) ->
@@ -203,8 +240,11 @@ DefaultErrorHandler kafkaErrorHandler(
 
 Notes:
 
+- Gate this bean on `app.dlq.enabled` (for example with `@ConditionalOnProperty(prefix = "app.dlq", name = "enabled", havingValue = "true", matchIfMissing = true)`) so the `enabled` property and the rollback step actually take effect. Without this, setting `app.dlq.enabled=false` has no runtime effect.
 - If Spring Boot auto-configuration does not attach this `DefaultErrorHandler` bean to the listener container factory, explicitly call `setCommonErrorHandler(...)` on the existing factory.
+- `dlqKafkaTemplate` must target the **CDLZ** cluster (`app.cdlz-kafka` / `FDP_APP_CDL_KAFKA_BROKER`) with its schema registry, because the listeners consume from that cluster and the recoverer republishes the original consumed record. Using the default adaptor `KafkaTemplate` (which points at `app.kafka` / `FDP_KAFKA_BROKER`) would write the DLQ to the wrong cluster.
 - The DLQ producer serializer must support both `GenericRecord` and `CdlzLandingRecord` payloads.
+- `addNotRetryableExceptions(DeserializationException.class, ...)` only helps if the consumer factory wraps its Avro deserializers in `ErrorHandlingDeserializer`. Otherwise deserialization/schema failures break the poll loop and never reach this handler or the DLQ. Verify this in `fdp-commons`.
 - Use Spring Kafka DLT headers where available; add project-specific headers such as `original-topic`, `original-partition`, `original-offset`, `error-class`, `error-message`, and `failed-at` only where needed.
 
 ---
@@ -234,6 +274,7 @@ The current `application.yml` already contains Dynatrace and Prometheus endpoint
 |--------|------------|---------|
 | `fdp.dlq.messages.total` | `topic`, `source_topic`, `exception` | Count records sent to DLQ |
 | `fdp.kafka.listener.retry.total` | `topic`, `exception` | Count retry attempts |
+| `fdp.kafka.listener.retry.exhausted.total` | `topic`, `exception` | Count records sent to DLQ after retries are exhausted |
 | `fdp.dlq.publish.failure.total` | `topic`, `exception` | Detect DLQ publish failures |
 
 Initial alert recommendation:
@@ -252,6 +293,7 @@ Initial alert recommendation:
 |-------|------|
 | Unit | Listener does not swallow exceptions; send future failure becomes `IllegalStateException`. |
 | Spring context | `DefaultErrorHandler` bean loads and is attached to the listener factory. |
+| Retry policy | Retryable exceptions use retry count/backoff; non-retryable exceptions use DLQ fast path. |
 | Serializer | DLQ KafkaTemplate can serialize `GenericRecord` and `CdlzLandingRecord` payloads. |
 | Integration | Existing docker-compose profile gets a failing-record scenario; after retry, the record appears in the expected DLQ topic. |
 | Regression | Successful records still flow to `fdp-sns-input` and `fdp-sns-lookup-eori`. |
