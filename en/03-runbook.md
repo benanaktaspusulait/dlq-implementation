@@ -19,6 +19,13 @@ This runbook describes the operational procedure after Kafka retry and DLQ imple
 | Retry count rising but no DLQ | Check listener error handler and retry config | High |
 | Reprocessed record returns to DLQ | Stop replay until root cause is fixed | High |
 
+Quick rules:
+
+- Do not replay until the root cause is fixed.
+- Do not delete DLQ messages during investigation.
+- Do not bulk replay EORI records until duplicate impact is understood.
+- Production console-consumer usage must follow access, audit, and data sensitivity rules.
+
 ---
 
 ## Operating Model by Phase
@@ -63,6 +70,18 @@ In Phase 1, a DLQ message does not mean "replay immediately"; first confirm root
 3. Was there a recent deployment or configuration change?
 4. Are Schema Registry, Kafka ACLs, and downstream services healthy?
 5. Is there duplicate/partial-output risk in the EORI flow?
+
+### Operational Ownership
+
+| Question | Runbook decision |
+|----------|------------------|
+| Who owns the alert? | Document application on-call and platform/DevOps escalation ownership |
+| Who triages DLQ records? | Application owner with schema/platform support |
+| Who approves replay? | Service owner or incident commander |
+| What is the first-response SLA? | Define separate SLA for warning and critical alerts |
+| What should the dashboard show? | Retry count, retry exhausted, DLQ count, DLQ publish failure, source topic lag, and consumer lag |
+
+`DLQ Messages Detected` starts triage and incident recording; it does not trigger automatic replay.
 
 ---
 
@@ -140,9 +159,33 @@ In production, check access, data sensitivity, and audit requirements before run
 
 ---
 
+## Incident Record Template
+
+Complete these fields for every retry/DLQ event:
+
+| Field | Value |
+|-------|-------|
+| Date/time | |
+| Environment | |
+| Source topic | |
+| DLQ topic | |
+| Partition/offset range | |
+| Exception class | |
+| Sample correlation/reference id | |
+| Same-window deployment/config changes | |
+| Schema version | |
+| Triage owner | |
+| Replay decision | |
+| Replay approver | |
+| Outcome | |
+
+---
+
 ## Reprocessing Procedure
 
 Only reprocess after the root cause has been fixed.
+
+A DLQ message does not automatically mean replay is safe. For EORI in particular, do not approve replay until duplicate output impact is understood.
 
 ### If No Reprocessor Exists
 
@@ -222,6 +265,6 @@ Checklist:
 
 ## Related Documents
 
-- [Why DLQ Should Be Implemented](00-why-dlq-must-be-implemented.md)
+- [Kafka Retry and DLQ Discovery Recommendation](00-why-dlq-must-be-implemented.md)
 - [Technical Analysis](01-technical-analysis.md)
 - [Implementation Guide](02-implementation-guide.md)

@@ -1,4 +1,4 @@
-# Kafka Retry and DLQ Technical Analysis: `cmd-adaptor-sns`
+# Kafka Failure Handling Discovery Technical Analysis: `cmd-adaptor-sns`
 
 ---
 
@@ -6,7 +6,7 @@
 
 This analysis covers the SNS command adaptor in `/Users/benanaktas/project/home-office/test1`. The main reviewed module is `cmd-adaptor-sns`; the related integration-test module is `cmd-adaptor-sns-integration-tests`.
 
-Other FDP adaptors should only be included after their code patterns have been verified.
+Other FDP adaptors should only be included after their code patterns have been verified. This analysis supports discovery and a controlled pilot to reduce **silent loss**, rather than an immediate coding task.
 
 ---
 
@@ -145,7 +145,7 @@ Exception classification should be explicit:
 
 | Phase | Architecture decision | Not done in this phase |
 |-------|-----------------------|------------------------|
-| Phase 0: Discovery | Confirm offset commit, CDLZ/adaptor cluster split, `ErrorHandlingDeserializer`, EORI duplicate impact, and exception taxonomy | No runtime behavior changes |
+| Phase 0: Discovery | Confirm offset commit, CDLZ/adaptor cluster split, `ErrorHandlingDeserializer`, serializer support, EORI duplicate impact, exception taxonomy, ownership, and topic provisioning | No runtime behavior changes; Phase 1 does not start |
 | Phase 1: No Silent Loss | Implement short blocking retry, DLQ, DLQ publish failure alerting, and listener exception propagation | No retry topics, reprocessor, or bulk replay |
 | Phase 2: Operational Hardening | Complete dashboards, alerts, runbook, DLQ inspection procedure, and schema mismatch operating decision | No new retry topology |
 | Phase 3: Retry Topic Pattern | Design retry topic chain only if lag/downstream outage evidence exists | Do not grow blocking retry without evidence |
@@ -154,9 +154,39 @@ Exception classification should be explicit:
 
 This sequence captures the critical safety gain in Phase 1 while delaying riskier automation until measurement and operational discipline exist.
 
+### Phase Gate / Decision Checklist
+
+Phase 0 should not close until this checklist is complete:
+
+- [ ] Offset commit semantics are confirmed for listener success, listener exception, retry exhausted, DLQ publish success, and DLQ publish failure.
+- [ ] CDLZ cluster and adaptor cluster responsibilities are written down.
+- [ ] `ErrorHandlingDeserializer` and schema/deserialization failure behaviour are confirmed in `fdp-commons`.
+- [ ] The DLQ `KafkaTemplate` is confirmed to target the **CDLZ** cluster.
+- [ ] The DLQ producer serializer supports both `GenericRecord` and `CdlzLandingRecord`.
+- [ ] EORI idempotency, duplicate, and partial-success behaviour is agreed.
+- [ ] Retryable/non-retryable exception taxonomy is approved.
+- [ ] Alert owner, DLQ triage owner, replay approver, and first-response SLA are defined.
+- [ ] DLQ topic provisioning, retention, ACL, and schema registry configuration are approved.
+
+---
+
+## Architecture Decision Records to Create
+
+| ADR | Candidate decision |
+|-----|--------------------|
+| ADR-001 | DLQ topics belong to consumed source topics, not output topics. |
+| ADR-002 | DLQ topics and DLQ producer use the CDLZ cluster. |
+| ADR-003 | Use short blocking retry for Phase 1. |
+| ADR-004 | Defer retry topics until lag/downstream outage evidence exists. |
+| ADR-005 | Do not automate replay until dry-run, RBAC, audit, rate limiting, and duplicate handling exist. |
+| ADR-006 | EORI replay requires an idempotency/duplicate strategy. |
+| ADR-007 | Confirm `ErrorHandlingDeserializer` for deserialization/schema DLQ behaviour. |
+
 ---
 
 ## Listener Changes
+
+The following code snippets are **illustrative candidate implementation** examples to consider only after Phase 0 decisions are confirmed. Do not apply them directly until the current `fdp-commons` Kafka factory behaviour and Spring Kafka version are checked.
 
 For the Spring Kafka error handler to run, the listener must not swallow the failure. Async send failures must also be returned to the listener thread.
 
@@ -179,6 +209,13 @@ public void listen(GenericRecord message) {
 ### EORI Listener
 
 The EORI listener can produce multiple output records from one landing record, so all send results should be awaited. Partial success and duplicate risks must be assessed separately.
+
+EORI is a separate risk area:
+
+- One consumed landing record can produce multiple `fdp-sns-lookup-eori` output records.
+- If some output sends succeed before a later failure, retrying the original input can create duplicates.
+- DLQ replay can duplicate lookup records unless output keys, idempotency, and downstream duplicate semantics are understood.
+- The SNS source listener is therefore the lower-risk first **No Silent Loss** pilot; include EORI in Phase 1 only after its idempotency/duplicate strategy is approved.
 
 ```java
 @KafkaListener(
@@ -208,6 +245,8 @@ public void listen(CdlzLandingRecord record) {
 ## Error Handler Design
 
 Use `DefaultErrorHandler` and an explicit destination resolver. Do not rely on a default recoverer suffix if operations expect specific DLQ topic names.
+
+This is also a Phase 0-dependent candidate implementation. Spring Boot may not automatically wire the `DefaultErrorHandler` bean depending on the existing `fdp-commons` listener container factory configuration.
 
 ```java
 @Bean
@@ -300,6 +339,18 @@ Initial alert recommendation:
 | DLQ Spike | `fdp.dlq.messages.total > 10` in 5 minutes | Critical |
 | DLQ Publish Failure | `fdp.dlq.publish.failure.total > 0` | Critical |
 
+Operational ownership matters as much as the metric:
+
+| Question | Phase 0/Phase 2 decision |
+|----------|--------------------------|
+| Who owns the alert? | Document whether this is application on-call, platform/DevOps, or shared |
+| Who triages DLQ records? | Application owner with schema/platform support where needed |
+| Who approves replay? | Service owner or incident commander |
+| What is the first-response SLA? | Define separately for warning and critical alerts |
+| Which dashboard? | Show retry count, retry exhausted, DLQ count, DLQ publish failure, source topic lag, and consumer lag together |
+
+`DLQ Messages Detected` should trigger triage, not automatic replay.
+
 ---
 
 ## Test Strategy
@@ -307,9 +358,15 @@ Initial alert recommendation:
 | Level | Test |
 |-------|------|
 | Unit | Listener does not swallow exceptions; send future failure becomes `IllegalStateException`. |
-| Spring context | `DefaultErrorHandler` bean loads and is attached to the listener factory. |
+| Spring context | `DefaultErrorHandler` bean loads and is actually attached to the listener factory. |
+| Feature flag | `app.dlq.enabled=false` prevents custom DLQ recoverer use. |
 | Retry policy | Retryable exceptions use retry count/backoff; non-retryable exceptions use DLQ fast path. |
 | Serializer | DLQ KafkaTemplate can serialize `GenericRecord` and `CdlzLandingRecord` payloads. |
+| Deserializer | Deserialization failure behaviour is verified with and without `ErrorHandlingDeserializer`. |
+| DLQ publish failure | DLQ publish failure increments a critical metric and fails visibly. |
+| Misconfiguration | Wrong DLQ topic/cluster configuration fails visibly rather than silently. |
+| EORI partial send | Partial-send failure and duplicate risk are made visible with tests. |
+| Rollback | Rollback behaviour is understood for both DLQ handler and listener exception propagation. |
 | Integration | Existing docker-compose profile gets a failing-record scenario; after retry, the record appears in the expected DLQ topic. |
 | Regression | Successful records still flow to `fdp-sns-input` and `fdp-sns-lookup-eori`. |
 
@@ -327,6 +384,6 @@ Initial alert recommendation:
 
 ## Related Documents
 
-- [Why DLQ Should Be Implemented](00-why-dlq-must-be-implemented.md)
+- [Kafka Retry and DLQ Discovery Recommendation](00-why-dlq-must-be-implemented.md)
 - [Implementation Guide](02-implementation-guide.md)
 - [Runbook](03-runbook.md)

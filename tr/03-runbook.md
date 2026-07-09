@@ -19,6 +19,13 @@ Bu runbook, Kafka retry ve DLQ implementasyonu devreye alındıktan sonra kullan
 | Retry artıyor ama DLQ yok | Listener error handler ve retry config'i kontrol et | Yüksek |
 | Reprocess edilen kayıt tekrar DLQ'ye düşüyor | Root cause giderilmeden replay'i durdur | Yüksek |
 
+Hızlı kurallar:
+
+- Root cause düzeltilmeden replay yapılmaz.
+- İnceleme sırasında DLQ mesajları silinmez.
+- Duplicate etkisi anlaşılmadan EORI kayıtları bulk replay edilmez.
+- Production console-consumer kullanımı erişim, audit ve veri hassasiyeti kurallarına uymalıdır.
+
 ---
 
 ## Fazlara Göre Operasyon Modeli
@@ -63,6 +70,18 @@ Faz 1'de bir DLQ mesajı oluşursa doğru aksiyon hemen replay yapmak değildir;
 3. Son deploy veya config değişikliği var mı?
 4. Schema Registry, Kafka ACL ve downstream servislerde hata var mı?
 5. EORI akışında duplicate/partial output ihtimali var mı?
+
+### Operasyonel Sahiplik
+
+| Soru | Runbook kararı |
+|------|----------------|
+| Alert'i kim sahiplenir? | On-call uygulama ekibi ve gerekirse platform/DevOps escalation sahibi yazılmalı |
+| DLQ kayıtlarını kim triage eder? | Uygulama owner, schema/platform owner desteğiyle |
+| Replay'i kim onaylar? | Service owner veya incident commander |
+| İlk yanıt SLA'i nedir? | Warning ve critical için ayrı SLA tanımlanmalı |
+| Dashboard ne göstermeli? | Retry count, retry exhausted, DLQ count, DLQ publish failure, source topic lag ve consumer lag |
+
+`DLQ Messages Detected` alert'i otomatik replay başlatmaz; triage ve incident kaydı başlatır.
 
 ---
 
@@ -140,9 +159,33 @@ Production ortamında bu komutlar doğrudan çalıştırılmadan önce erişim, 
 
 ---
 
+## Incident Kayıt Şablonu
+
+Her DLQ/retry olayı için aşağıdaki alanlar doldurulmalıdır:
+
+| Alan | Değer |
+|------|-------|
+| Date/time | |
+| Environment | |
+| Source topic | |
+| DLQ topic | |
+| Partition/offset range | |
+| Exception class | |
+| Sample correlation/reference id | |
+| Same-window deployment/config changes | |
+| Schema version | |
+| Triage owner | |
+| Replay decision | |
+| Replay approver | |
+| Outcome | |
+
+---
+
 ## Reprocessing Prosedürü
 
 Reprocessing yalnızca root cause düzeltildikten sonra yapılmalıdır.
+
+DLQ mesajı olması replay yapılacağı anlamına gelmez. Özellikle EORI için replay kararı, duplicate output etkisi anlaşılmadan verilmemelidir.
 
 ### Reprocessor Yoksa
 
@@ -222,6 +265,6 @@ Kontrol listesi:
 
 ## İlgili Belgeler
 
-- [DLQ Neden Yapılmalı](00-dlq-neden-yapilmali.md)
+- [Kafka Retry ve DLQ Discovery Önerisi](00-dlq-neden-yapilmali.md)
 - [Teknik Analiz](01-teknik-analiz.md)
 - [Uygulama Kılavuzu](02-uygulama-kilavuzu.md)

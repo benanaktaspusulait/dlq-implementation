@@ -1,8 +1,10 @@
-# Kafka Retry ve DLQ Uygulama Kılavuzu
+# Kafka Retry ve DLQ Aday Uygulama Kılavuzu
 
 ---
 
 ## Ön Koşullar
+
+Bu kılavuzdaki kod örnekleri **Faz 0 discovery kararları onaylandıktan sonra** değerlendirilecek illustrative candidate implementation örnekleridir. Amaç, hemen tam platform retry/DLQ standardı kurmak değil, önce **No Silent Loss SNS Pilot** için en düşük karmaşıklıklı ve geri alınabilir yaklaşımı netleştirmektir.
 
 - DLQ topic isimleri platform ekibiyle netleştirilmeli.
 - DLQ producer'ın Avro serializer ayarları `GenericRecord` ve `CdlzLandingRecord` için doğrulanmalı.
@@ -32,6 +34,8 @@ Bu kılavuzun ana uygulama kapsamı **Faz 1: No Silent Loss SNS Pilot** içindir
 ---
 
 ## 1. Konfigürasyon Ekle
+
+Bu bölüm aday konfigürasyon örneğidir; Faz 0 tamamlanmadan application config'e uygulanmamalıdır.
 
 `cmd-adaptor-sns/src/main/resources/application.yml`:
 
@@ -67,6 +71,8 @@ app:
 ---
 
 ## 2. DLQ Properties Sınıfı Ekle
+
+Aşağıdaki sınıf mapping yaklaşımını göstermek içindir; mevcut config binding ve `fdp-commons` pattern'leriyle uyumu ayrıca doğrulanmalıdır.
 
 ```java
 @ConfigurationProperties(prefix = "app.dlq")
@@ -105,6 +111,8 @@ Bu örnek mapping mantığını gösterir. Uygulamada `sourceInput` ve `eoriInpu
 ---
 
 ## 3. Error Handler Ekle
+
+Bu örnek, Faz 0 kararları doğrulandıktan sonra uygulanabilecek aday implementasyondur. Spring Boot, mevcut `fdp-commons` Kafka listener container factory konfigürasyonuna bağlı olarak `DefaultErrorHandler` bean'ini otomatik bağlamayabilir.
 
 `cmd-adaptor-sns/src/main/java/uk/gov/ho/dacc/fdp/config/DlqConfig.java`:
 
@@ -161,6 +169,13 @@ Eğer mevcut Kafka listener container factory bu bean'i otomatik kullanmıyorsa 
 
 `@ConditionalOnProperty` bean'i `app.dlq.enabled`'e bağlar. Değer `false` olduğunda bean oluşturulmaz ve container Spring'in varsayılan error handling davranışına döner. `dlqKafkaTemplate`, **CDLZ** cluster'ına göre yapılandırılmış bir `KafkaTemplate` olmalıdır (bkz. Ön Koşullar); çünkü tüketilen kayıtlar ve DLQ topic'leri o cluster'da bulunur.
 
+Uyarılar:
+
+- `app.dlq.enabled=false`, yalnızca custom DLQ config bean'i gerçekten `@ConditionalOnProperty` ile koşullandırıldıysa DLQ recoverer'ı devre dışı bırakır.
+- DLQ'yi devre dışı bırakmak, listener exception propagation değişikliğini otomatik geri almaz.
+- `.get()` örnekleri uygulanmadan önce kullanılan Spring Kafka versiyonunda `KafkaTemplate.send()` dönüş tipinin `CompletableFuture` mı `ListenableFuture` mı olduğu kontrol edilmelidir.
+- `.get()` ile blocking yapmak Faz 1 için bilinçli bir trade-off'tur; tüm producer akışları için evrensel pattern olarak kopyalanmamalıdır.
+
 ---
 
 ## 4. Retry Politikasını Netleştir
@@ -179,6 +194,8 @@ Bu ayrım yapılmazsa poison message aynı partition'ı tekrar tekrar bekletebil
 
 ## 5. Listener'ları Güncelle
 
+Aşağıdaki listener örnekleri, producer send acknowledgement hatasını listener thread'ine taşımayı gösterir. Faz 0'da Spring Kafka versiyonu ve mevcut `KafkaTemplate` tipi doğrulanmadan doğrudan uygulanmamalıdır.
+
 ### `KafkaSourceListener`
 
 ```java
@@ -196,6 +213,8 @@ public void listen(GenericRecord message) {
 ```
 
 ### `KafkaLookupEoriListener`
+
+EORI path'i SNS'ten daha risklidir. Tek landing record birden fazla lookup output kaydı üretebilir; bazı send'ler başarılı olduktan sonra hata alınırsa retry/replay duplicate output yaratabilir. Faz 1'e dahil edilmeden önce idempotent key, transactional outbox, duplicate-tolerant downstream handling veya başka bir duplicate strategy onaylanmalıdır.
 
 ```java
 @KafkaListener(
@@ -278,6 +297,15 @@ meterRegistry.counter(
 | DLQ Spike | 5 dakikada 10+ DLQ mesajı | Critical |
 | DLQ Publish Failure | DLQ publish başarısızlığı | Critical |
 
+Operasyonel sahiplik:
+
+- Alert owner yazılı olmalı.
+- DLQ triage owner yazılı olmalı.
+- Replay approver yazılı olmalı.
+- İlk yanıt SLA'i warning/critical seviyesine göre belirlenmeli.
+- Dashboard; retry count, retry exhausted, DLQ count, DLQ publish failure, source topic lag ve consumer lag metric'lerini birlikte göstermeli.
+- `DLQ Messages Detected` alert'i otomatik replay değil, triage başlatmalıdır.
+
 ---
 
 ## 8. Testler
@@ -290,6 +318,13 @@ meterRegistry.counter(
 - Retryable exception'da beklenen retry sayısı uygulanmalı.
 - Non-retryable exception'da retry beklenmeden DLQ fast-path çalışmalı.
 - DLQ topic resolver `landing-1 -> landing-1-dlq` ve `landing-413 -> landing-413-dlq` mapping'ini doğru yapmalı.
+- `DefaultErrorHandler` gerçekten listener container factory'ye attach edilmeli.
+- `app.dlq.enabled=false` custom DLQ recoverer kullanımını engellemeli.
+- DLQ publish failure critical metric'i artırmalı.
+- Deserialization failure davranışı `ErrorHandlingDeserializer` varken ve yokken test edilmeli.
+- Yanlış DLQ topic/cluster konfigürasyonu sessiz kalmadan görünür fail etmeli.
+- EORI partial-send failure ve duplicate riski testle görünür hale getirilmeli.
+- Rollback davranışı, hem DLQ handler hem listener exception propagation için anlaşılmalı.
 
 ### Entegrasyon Testi
 
@@ -318,6 +353,6 @@ Rollback sırasında DLQ topic'leri silinmemelidir. İçerik, incident analizi v
 
 ## İlgili Belgeler
 
-- [DLQ Neden Yapılmalı](00-dlq-neden-yapilmali.md)
+- [Kafka Retry ve DLQ Discovery Önerisi](00-dlq-neden-yapilmali.md)
 - [Teknik Analiz](01-teknik-analiz.md)
 - [Runbook](03-runbook.md)

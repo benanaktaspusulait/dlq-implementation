@@ -1,8 +1,10 @@
-# Kafka Retry and DLQ Implementation Guide
+# Kafka Retry and DLQ Candidate Implementation Guide
 
 ---
 
 ## Preconditions
+
+The examples in this guide are **illustrative candidate implementation** only after Phase 0 discovery decisions are approved. The goal is not immediate platform-wide retry/DLQ standardisation; it is the lowest-complexity, reversible path for the **No Silent Loss SNS Pilot**.
 
 - Confirm DLQ topic names with the platform team.
 - Verify Avro serializer settings for `GenericRecord` and `CdlzLandingRecord` on the DLQ producer.
@@ -32,6 +34,8 @@ Retry topics and reprocessor tooling should not be added to Phase 1. The first w
 ---
 
 ## 1. Add Configuration
+
+This is candidate configuration. Do not apply it to application config before Phase 0 closes.
 
 `cmd-adaptor-sns/src/main/resources/application.yml`:
 
@@ -67,6 +71,8 @@ app:
 ---
 
 ## 2. Add DLQ Properties
+
+The following class demonstrates the mapping approach; verify it against existing config binding and `fdp-commons` patterns before implementation.
 
 ```java
 @ConfigurationProperties(prefix = "app.dlq")
@@ -105,6 +111,8 @@ This example shows the mapping logic. In the implementation, `sourceInput` and `
 ---
 
 ## 3. Add Error Handler
+
+This is a candidate implementation after Phase 0 decisions are confirmed. Spring Boot may not automatically wire this `DefaultErrorHandler` depending on the existing `fdp-commons` Kafka listener container factory configuration.
 
 `cmd-adaptor-sns/src/main/java/uk/gov/ho/dacc/fdp/config/DlqConfig.java`:
 
@@ -161,6 +169,13 @@ If the current Kafka listener container factory does not pick up this bean autom
 
 `@ConditionalOnProperty` ties the bean to `app.dlq.enabled`. When it is `false` the bean is not created and the container falls back to Spring's default error handling. `dlqKafkaTemplate` must be a `KafkaTemplate` configured against the **CDLZ** cluster (see Preconditions), because that is where the consumed records and DLQ topics live.
 
+Warnings:
+
+- `app.dlq.enabled=false` disables the custom DLQ recoverer only if the bean is actually gated with `@ConditionalOnProperty`.
+- Disabling DLQ does not automatically revert listener exception propagation.
+- Check whether the project Spring Kafka version returns `CompletableFuture` or `ListenableFuture` before applying `.get()` examples.
+- Blocking on `.get()` is a deliberate Phase 1 trade-off, not a universal producer pattern.
+
 ---
 
 ## 4. Clarify Retry Policy
@@ -179,6 +194,8 @@ Without this distinction, a poison message can hold the same partition repeatedl
 
 ## 5. Update Listeners
 
+The listener examples below show how to surface producer send acknowledgement failures back to the listener thread. Do not apply them directly until the Spring Kafka version and current `KafkaTemplate` type are confirmed.
+
 ### `KafkaSourceListener`
 
 ```java
@@ -196,6 +213,8 @@ public void listen(GenericRecord message) {
 ```
 
 ### `KafkaLookupEoriListener`
+
+The EORI path is riskier than SNS. One landing record can produce multiple lookup output records; if some sends succeed before a later failure, retry/replay may duplicate output. Before including EORI in Phase 1, approve idempotent keys, transactional outbox, duplicate-tolerant downstream handling, or another duplicate strategy.
 
 ```java
 @KafkaListener(
@@ -278,6 +297,15 @@ Suggested alerts:
 | DLQ Spike | 10+ DLQ messages in 5 minutes | Critical |
 | DLQ Publish Failure | Any DLQ publish failure | Critical |
 
+Operational ownership:
+
+- Document the alert owner.
+- Document the DLQ triage owner.
+- Document the replay approver.
+- Define first-response SLA by warning/critical severity.
+- Dashboard must show retry count, retry exhausted, DLQ count, DLQ publish failure, source topic lag, and consumer lag.
+- `DLQ Messages Detected` should start triage, not automatic replay.
+
 ---
 
 ## 8. Tests
@@ -290,6 +318,13 @@ Suggested alerts:
 - Retryable exceptions use the expected retry count.
 - Non-retryable exceptions use DLQ fast path without waiting for retries.
 - DLQ topic resolver maps `landing-1 -> landing-1-dlq` and `landing-413 -> landing-413-dlq`.
+- `DefaultErrorHandler` is actually attached to the listener container factory.
+- `app.dlq.enabled=false` prevents custom DLQ recoverer use.
+- DLQ publish failure increments a critical metric.
+- Deserialization failure behaviour is tested with and without `ErrorHandlingDeserializer`.
+- Wrong DLQ topic/cluster configuration fails visibly.
+- EORI partial-send failure and duplicate risk are made visible in tests.
+- Rollback behaviour is understood for both the DLQ handler and listener exception propagation.
 
 ### Integration Test
 
@@ -318,6 +353,6 @@ Do not delete DLQ topics during rollback. Their contents should be preserved for
 
 ## Related Documents
 
-- [Why DLQ Should Be Implemented](00-why-dlq-must-be-implemented.md)
+- [Kafka Retry and DLQ Discovery Recommendation](00-why-dlq-must-be-implemented.md)
 - [Technical Analysis](01-technical-analysis.md)
 - [Runbook](03-runbook.md)

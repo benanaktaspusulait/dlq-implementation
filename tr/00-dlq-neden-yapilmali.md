@@ -1,4 +1,4 @@
-# Kafka Retry ve Dead Letter Queue (DLQ) Önerisi
+# Kafka Retry ve DLQ Discovery Önerisi
 
 | Alan | Değer |
 |------|-------|
@@ -7,15 +7,25 @@
 | Oluşturulma | 2026-07-08 |
 | Son güncelleme | 2026-07-09 |
 | Kapsam | `/Users/benanaktas/project/home-office/test1` içindeki `cmd-adaptor-sns` projesi |
-| Etiketler | kafka, dlq, error-handling, data-integrity |
+| Etiketler | kafka, retry, dlq, error-handling, no-silent-loss, data-integrity |
 
 ---
+
+## Executive Summary
+
+- **Mevcut risk:** `cmd-adaptor-sns` listener'larında `try/catch + log.error` pattern'i var; bu, başarısız kayıtların başarılı tüketilmiş gibi commit edilmesine yol açabilir.
+- **Mevcut risk:** `KafkaTemplate.send()` async çalışıyor; send sonucu beklenmediğinde producer acknowledgement hataları listener'a dönmeyebilir.
+- **Mevcut boşluk:** Recover edilebilir failed-record destination yok; retry/DLQ telemetry ve alert ownership tanımlı değil.
+- **Öneri:** Kod değişikliğine geçmeden önce Faz 0 discovery zorunlu tamamlanmalı; offset commit, cluster, serializer, deserializer, exception taxonomy ve operasyon sahipliği doğrulanmalıdır.
+- **İlk teslim hedefi:** Tam platform standardizasyonu değil, **No Silent Loss SNS Pilot** olmalıdır.
+- **Kapsam uyarısı:** Bu bulgular `cmd-adaptor-sns` için doğrulanmıştır; diğer FDP adaptörleri ayrıca validate edilmeden rollout kapsamına alınmamalıdır.
 
 ## Ana Mesaj
 
 1. `cmd-adaptor-sns` içinde Kafka listener hataları uygulama kodunda yakalanıp sadece loglanıyor.
 2. Bu davranış Spring Kafka retry/error handler zincirini devre dışı bırakıyor; transient hatalar tekrar denenmiyor.
-3. Öneri sadece DLQ değildir: kısa Kafka consumer retry, hata sınıflandırması, gerekirse retry topic pattern'i ve son durak olarak DLQ birlikte tasarlanmalıdır.
+3. Asıl mimari risk **silent loss / silent failure** riskidir; DLQ tek başına çözüm değil, failure-management tasarımının bir parçasıdır.
+4. Öneri; listener exception propagation, producer send acknowledgement, bounded retry, exception classification, DLQ, metrics, alerting ve daha sonra controlled replay adımlarını birlikte ele alır.
 
 ---
 
@@ -68,7 +78,7 @@ Hedef akış:
 Kafka kaydı -> Listener -> Hata dışarı fırlatılır -> Kafka retry -> hala başarısızsa DLQ -> metric/alert
 ```
 
-DLQ, hatalı kaydı orijinal payload ve hata metadata'sı ile korur. Bu sayede kayıt yeniden üretilebilen, incelenebilen ve kontrollü şekilde tekrar işlenebilen bir artefakt olur.
+DLQ, hatalı kaydı orijinal payload ve hata metadata'sı ile korumaya yardımcı olur. Ancak DLQ tek başına retry, replay, idempotency veya operasyon sahipliği problemlerini çözmez; kayıt yalnızca kontrollü, onaylı prosedür altında potansiyel olarak tekrar işlenebilir hale gelir.
 
 ### Kafka Retry Neden Ayrı Tasarlanmalı?
 
@@ -91,7 +101,7 @@ DLQ; original topic, partition, offset, timestamp, exception type ve error messa
 
 ## Önerilen Çözüm
 
-**Birincil öneri:** Spring Kafka `DefaultErrorHandler` ile sınırlı consumer retry + `DeadLetterPublishingRecoverer` ile DLQ + zenginleştirilmiş metadata.
+**Birincil öneri:** Faz 0 discovery tamamlandıktan sonra kontrollü pilot olarak Spring Kafka `DefaultErrorHandler` ile sınırlı consumer retry + `DeadLetterPublishingRecoverer` ile DLQ + zenginleştirilmiş metadata.
 
 Bu seçenek custom bir hata altyapısı yazmadan Spring Kafka'nın listener retry ve recoverer davranışını kullanır. Proje özelinde kritik nokta, mevcut listener `try/catch` bloklarının hatayı yutmaması ve producer send hatalarının listener thread'ine taşınmasıdır.
 
@@ -125,7 +135,7 @@ Her iki tüketilen topic de **CDLZ cluster**'ında (`app.cdlz-kafka`, `FDP_APP_C
 
 | Seçenek | Açıklama | Artı | Eksi |
 |---------|----------|------|------|
-| A | Blocking retry + `DefaultErrorHandler` + DLQ | En hızlı pilot, az kod | Uzun kesintilerde partition bekleyebilir |
+| A | Blocking retry + `DefaultErrorHandler` + DLQ | En düşük karmaşıklıktaki pilot seçeneği | Uzun kesintilerde partition bekleyebilir |
 | B | Blocking retry + explicit DLQ resolver + metadata + metric | Önerilen ilk faz; audit ve alert destekler | Retry sınıflandırması/test gerekir |
 | C | Retry topic pattern + DLQ | Uzun backoff ve yüksek hacim için güçlü | Daha fazla topic ve operasyonel karmaşıklık |
 
@@ -137,6 +147,8 @@ Bu iş tek seferde "büyük Kafka platform değişikliği" olarak yapılmamalıd
 
 ### Faz 0: Architecture Discovery
 
+Bu faz hard gate'tir. Aşağıdaki kararlar dokümante edilmeden Faz 1 implementasyonuna başlanmamalıdır.
+
 Davranış değiştirmeden kanıt topla.
 
 - [ ] Offset commit semantiğini doğrula: başarı, retry exhausted, DLQ publish success/failure durumlarında offset ne oluyor?
@@ -144,6 +156,23 @@ Davranış değiştirmeden kanıt topla.
 - [ ] CDLZ consumer factory'nin `ErrorHandlingDeserializer` kullanıp kullanmadığını doğrula.
 - [ ] EORI akışında partial success ve duplicate etkisini analiz et.
 - [ ] Retryable/non-retryable exception taxonomy'sini yaz.
+
+#### Phase Gate / Decision Checklist
+
+- [ ] Listener success durumunda offset commit davranışı doğrulandı.
+- [ ] Listener exception durumunda offset commit davranışı doğrulandı.
+- [ ] Retry exhausted durumunda offset commit davranışı doğrulandı.
+- [ ] DLQ publish success durumunda offset commit davranışı doğrulandı.
+- [ ] DLQ publish failure durumunda offset commit davranışı doğrulandı.
+- [ ] CDLZ cluster vs adaptor cluster sorumlulukları netleştirildi.
+- [ ] `fdp-commons` içinde `ErrorHandlingDeserializer` konfigürasyonu doğrulandı.
+- [ ] DLQ `KafkaTemplate`'in adaptor cluster'ına değil CDLZ cluster'ına yazacağı doğrulandı.
+- [ ] DLQ serializer desteği hem `GenericRecord` hem `CdlzLandingRecord` için doğrulandı.
+- [ ] EORI idempotency, duplicate ve partial-success davranışı karara bağlandı.
+- [ ] Retryable vs non-retryable exception taxonomy'si onaylandı.
+- [ ] Alert ownership ve operasyonel response ownership tanımlandı.
+- [ ] Topic provisioning, retention, ACL ve schema registry konfigürasyonu onaylandı.
+- [ ] EORI Faz 1'e dahil mi, yoksa idempotency netleşene kadar sadece dokümante mi edilecek kararı verildi.
 
 Çıkış kriteri: error taxonomy, offset commit kararı, DLQ cluster kararı ve EORI idempotency kararı dokümante edilmiş olmalı.
 
@@ -157,6 +186,7 @@ Amaç sadece sessiz veri kaybını durdurmaktır; retry topic ve reprocessor bu 
 - [ ] Retry exhausted sonrası original consumed record'u DLQ'ye gönder.
 - [ ] DLQ publish failure için critical metric/alert ekle.
 - [ ] Unit ve docker-compose entegrasyon testleriyle silent loss'un bittiğini doğrula.
+- [ ] EORI, Faz 1'e ancak idempotency/duplicate stratejisi onaylandıysa dahil edilsin; aksi halde SNS pilot dışında tasarım konusu olarak kalsın.
 
 Çıkış kriteri: kayıt ya başarıyla işlenir ya retry edilir ya da DLQ'ye korunarak gider; `log.error` ile sessiz kayıp kalmaz.
 
@@ -220,6 +250,20 @@ SNS pilot başarılı olduktan sonra pattern ortak hale getirilebilir.
 | DLQ yanlış cluster'a yazılır | CDLZ cluster'ından tüketilen kayıtlar yeniden yayınlanamaz/bulunamaz | DLQ topic'lerini ve DLQ `KafkaTemplate`'ini CDLZ cluster'ına (`FDP_APP_CDL_KAFKA_BROKER`) yönlendir, adaptör cluster'ına değil |
 | Deserialization hataları handler'ı atlar | Poison/schema hataları poll döngüsünü kırar, DLQ'ye hiç ulaşmaz | Consumer Avro deserializer'larını `ErrorHandlingDeserializer` ile sar (`fdp-commons` içinde) |
 | `app.dlq.enabled` flag'i bir bean'e bağlı değil | Flag üzerinden rollback hiçbir etki yaratmaz | `DlqConfig`'i `app.dlq.enabled` üzerinde `@ConditionalOnProperty` ile koşullandır |
+
+---
+
+## Architecture Decision Records to Create
+
+| ADR | Karar |
+|-----|-------|
+| ADR-001 | DLQ topic'leri output topic'lere değil, tüketilen source topic'lere aittir. |
+| ADR-002 | DLQ topic'leri ve DLQ producer CDLZ cluster'ını kullanır. |
+| ADR-003 | Faz 1 için yalnızca kısa blocking retry kullanılır. |
+| ADR-004 | Retry topic'ler lag/downstream outage kanıtı oluşana kadar ertelenir. |
+| ADR-005 | Dry-run, RBAC, audit, rate limit ve duplicate handling olmadan automated replay yapılmaz. |
+| ADR-006 | EORI replay, idempotency/duplicate stratejisi netleşmeden enable edilmez. |
+| ADR-007 | Schema/deserialization DLQ davranışı için `ErrorHandlingDeserializer` doğrulanmalıdır. |
 
 ---
 

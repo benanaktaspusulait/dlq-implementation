@@ -1,4 +1,4 @@
-# Kafka Retry ve DLQ Teknik Analiz: `cmd-adaptor-sns`
+# Kafka Failure Handling Discovery Teknik Analizi: `cmd-adaptor-sns`
 
 ---
 
@@ -6,7 +6,7 @@
 
 Bu analiz `/Users/benanaktas/project/home-office/test1` projesindeki SNS command adaptor için hazırlanmıştır. İncelenen ana modül `cmd-adaptor-sns`, ilgili entegrasyon test modülü ise `cmd-adaptor-sns-integration-tests`tir.
 
-Diğer FDP adaptörleri için aynı öneri ancak kod pattern'i doğrulandıktan sonra genelleştirilmelidir.
+Diğer FDP adaptörleri için aynı öneri ancak kod pattern'i doğrulandıktan sonra genelleştirilmelidir. Bu analiz, immediate coding task değil, **silent loss** riskini azaltmaya yönelik discovery ve kontrollü pilot kararlarını destekler.
 
 ---
 
@@ -145,7 +145,7 @@ Exception sınıflandırması açık olmalıdır:
 
 | Faz | Mimari karar | Bu fazda yapılmayanlar |
 |-----|--------------|------------------------|
-| Faz 0: Discovery | Offset commit, CDLZ/adaptor cluster ayrımı, `ErrorHandlingDeserializer`, EORI duplicate etkisi ve exception taxonomy doğrulanır | Runtime davranışı değiştirilmez |
+| Faz 0: Discovery | Offset commit, CDLZ/adaptor cluster ayrımı, `ErrorHandlingDeserializer`, serializer desteği, EORI duplicate etkisi, exception taxonomy, ownership ve topic provisioning doğrulanır | Runtime davranışı değiştirilmez; Faz 1 başlamaz |
 | Faz 1: No Silent Loss | Kısa blocking retry, DLQ, DLQ publish failure alert ve listener exception propagation uygulanır | Retry topic, reprocessor, bulk replay yok |
 | Faz 2: Operational Hardening | Dashboard, alert, runbook, DLQ inspect prosedürü ve schema mismatch operasyon kararı tamamlanır | Yeni retry topolojisi eklenmez |
 | Faz 3: Retry Topic Pattern | Sadece lag/downstream outage kanıtı varsa retry topic zinciri tasarlanır | Kanıt yoksa blocking retry büyütülmez |
@@ -154,9 +154,39 @@ Exception sınıflandırması açık olmalıdır:
 
 Bu sıralama, kritik güvenlik kazanımını Faz 1'de alırken daha riskli otomasyonları ölçüm ve operasyon disiplini sonrasına bırakır.
 
+### Phase Gate / Decision Checklist
+
+Faz 0 aşağıdaki checklist tamamlanmadan kapanmış sayılmamalıdır:
+
+- [ ] Listener success, listener exception, retry exhausted, DLQ publish success ve DLQ publish failure durumlarında offset commit semantiği doğrulandı.
+- [ ] CDLZ cluster ve adaptor cluster sorumlulukları yazılı hale getirildi.
+- [ ] `fdp-commons` içinde `ErrorHandlingDeserializer` varlığı ve schema/deserialization hata davranışı doğrulandı.
+- [ ] DLQ `KafkaTemplate`'in **CDLZ** cluster'ını hedefleyeceği doğrulandı.
+- [ ] DLQ producer serializer'ının `GenericRecord` ve `CdlzLandingRecord` payload'larını desteklediği test edildi.
+- [ ] EORI idempotency, duplicate ve partial-success davranışı karara bağlandı.
+- [ ] Retryable/non-retryable exception taxonomy'si ekipçe onaylandı.
+- [ ] Alert owner, DLQ triage owner, replay approver ve first-response SLA belirlendi.
+- [ ] DLQ topic provisioning, retention, ACL ve schema registry konfigürasyonu onaylandı.
+
+---
+
+## Architecture Decision Records to Create
+
+| ADR | Karar adayı |
+|-----|-------------|
+| ADR-001 | DLQ topic'leri output topic'lere değil, tüketilen source topic'lere aittir. |
+| ADR-002 | DLQ topic'leri ve DLQ producer CDLZ cluster'ını kullanır. |
+| ADR-003 | Faz 1 için kısa blocking retry kullanılır. |
+| ADR-004 | Retry topic'ler lag/downstream outage kanıtı oluşana kadar ertelenir. |
+| ADR-005 | Dry-run, RBAC, audit, rate limit ve duplicate handling olmadan automated replay yapılmaz. |
+| ADR-006 | EORI replay için idempotency/duplicate stratejisi prerequisite'tir. |
+| ADR-007 | Deserialization/schema hatalarının DLQ davranışı için `ErrorHandlingDeserializer` doğrulanır. |
+
 ---
 
 ## Listener Değişikliği
+
+Aşağıdaki kodlar Faz 0 kararları doğrulandıktan sonra değerlendirilecek **illustrative candidate implementation** örnekleridir; mevcut `fdp-commons` Kafka factory davranışı ve Spring Kafka versiyonu doğrulanmadan doğrudan uygulanmamalıdır.
 
 Spring Kafka error handler'ın çalışması için listener hatayı yutmamalıdır. Ayrıca async send hatası listener thread'ine dönmelidir.
 
@@ -179,6 +209,13 @@ public void listen(GenericRecord message) {
 ### EORI Listener
 
 EORI listener bir landing kaydından birden fazla output send üretebildiği için tüm send sonuçları beklenmelidir. Partial success ve duplicate riskleri ayrıca değerlendirilmelidir.
+
+EORI ayrıca ayrı risk alanıdır:
+
+- Bir consumed landing record birden fazla `fdp-sns-lookup-eori` output kaydı üretebilir.
+- Bazı output send'ler başarılı olduktan sonra hata alınırsa original input retry edildiğinde duplicate oluşabilir.
+- DLQ'den replay, output key/idempotency/downstream duplicate semantics anlaşılmadan lookup kayıtlarını tekrar üretebilir.
+- Bu nedenle SNS source listener, ilk **No Silent Loss** pilot için daha düşük riskli adaydır; EORI Faz 1'e dahil edilecekse idempotency/duplicate stratejisi önce onaylanmalıdır.
 
 ```java
 @KafkaListener(
@@ -208,6 +245,8 @@ public void listen(CdlzLandingRecord record) {
 ## Error Handler Tasarımı
 
 Önerilen yaklaşım `DefaultErrorHandler` ve explicit destination resolver kullanmaktır. Default recoverer suffix davranışına güvenmek yerine giriş topic -> DLQ topic mapping'i açık yazılmalıdır.
+
+Bu da Faz 0 sonrası aday implementasyondur. Spring Boot, mevcut `fdp-commons` listener container factory konfigürasyonuna bağlı olarak `DefaultErrorHandler` bean'ini otomatik bağlamayabilir.
 
 ```java
 @Bean
@@ -300,6 +339,18 @@ Alert başlangıç önerisi:
 | DLQ Spike | 5 dakika içinde `fdp.dlq.messages.total > 10` | Critical |
 | DLQ Publish Failure | `fdp.dlq.publish.failure.total > 0` | Critical |
 
+Operasyonel sahiplik de metric kadar önemlidir:
+
+| Soru | Faz 0/Faz 2 kararı |
+|------|--------------------|
+| Alert'i kim sahiplenir? | On-call uygulama ekibi mi, platform/DevOps mu yazılmalı |
+| DLQ kayıtlarını kim triage eder? | Uygulama owner + gerekirse schema/platform owner |
+| Replay'i kim onaylar? | Service owner veya incident commander |
+| İlk yanıt SLA'i nedir? | Örn. warning için 30 dk, critical için 5 dk gibi netleştirilmeli |
+| Dashboard nerede? | Retry count, retry exhausted, DLQ count, DLQ publish failure, source topic lag ve consumer lag aynı görünümde olmalı |
+
+`DLQ Messages Detected` otomatik replay tetiklememelidir; triage başlatmalıdır.
+
 ---
 
 ## Test Stratejisi
@@ -307,9 +358,15 @@ Alert başlangıç önerisi:
 | Seviye | Test |
 |--------|------|
 | Unit | Listener exception'ı yutmuyor; send future failure `IllegalStateException` olarak dışarı çıkıyor. |
-| Spring context | `DefaultErrorHandler` bean'i yükleniyor ve listener factory'ye bağlanıyor. |
+| Spring context | `DefaultErrorHandler` bean'i yükleniyor ve listener factory'ye gerçekten bağlanıyor. |
+| Feature flag | `app.dlq.enabled=false` custom DLQ recoverer kullanımını engelliyor. |
 | Retry policy | Retryable exception'larda retry sayısı ve backoff uygulanıyor; non-retryable exception'larda DLQ fast-path çalışıyor. |
 | Serializer | DLQ KafkaTemplate `GenericRecord` ve `CdlzLandingRecord` payload'larını serialize edebiliyor. |
+| Deserializer | `ErrorHandlingDeserializer` varken ve yokken deserialization failure davranışı doğrulanıyor. |
+| DLQ publish failure | DLQ publish hatası critical metric'i artırıyor ve görünür fail ediyor. |
+| Misconfiguration | Yanlış DLQ topic/cluster konfigürasyonu sessiz kalmıyor, görünür fail ediyor. |
+| EORI partial send | Partial-send failure ve duplicate riski testle görünür hale getiriliyor. |
+| Rollback | `app.dlq.enabled=false` ve listener exception propagation etkisinin rollback davranışı anlaşılıyor. |
 | Integration | Mevcut docker-compose profiline hatalı kayıt senaryosu ekleniyor; retry sonrası kayıt doğru DLQ topic'inde görülüyor. |
 | Regression | Başarılı kayıtlar mevcut `fdp-sns-input` ve `fdp-sns-lookup-eori` akışını bozmuyor. |
 
@@ -327,6 +384,6 @@ Alert başlangıç önerisi:
 
 ## İlgili Belgeler
 
-- [DLQ Neden Yapılmalı](00-dlq-neden-yapilmali.md)
+- [Kafka Retry ve DLQ Discovery Önerisi](00-dlq-neden-yapilmali.md)
 - [Uygulama Kılavuzu](02-uygulama-kilavuzu.md)
 - [Runbook](03-runbook.md)
