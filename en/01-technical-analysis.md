@@ -448,6 +448,6 @@ DLQ records contain the original message payload, which may include sensitive da
 
 ## Related Documents
 
-- [Kafka Retry and DLQ Discovery Recommendation](00-why-dlq-must-be-implemented.md)
+- [Kafka Retry and DLQ Discovery Recommendation](00-kafka-failure-handling-discovery-recommendation.md)
 - [Implementation Guide](02-implementation-guide.md)
 - [Runbook](03-runbook.md)

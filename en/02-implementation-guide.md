@@ -356,6 +356,6 @@ Do not delete DLQ topics during rollback. Their contents should be preserved for
 
 ## Related Documents
 
-- [Kafka Retry and DLQ Discovery Recommendation](00-why-dlq-must-be-implemented.md)
+- [Kafka Retry and DLQ Discovery Recommendation](00-kafka-failure-handling-discovery-recommendation.md)
 - [Technical Analysis](01-technical-analysis.md)
 - [Runbook](03-runbook.md)
