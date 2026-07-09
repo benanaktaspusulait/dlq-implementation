@@ -104,7 +104,7 @@ Bu seçenek custom bir hata altyapısı yazmadan Spring Kafka'nın listener retr
 | Kalıcı business validation hatası | DLQ | Veri veya kod düzeltmesi gerekir |
 | Uzun süreli downstream kesinti | Retry topic pattern'i değerlendir | Uzun blocking retry partition'ı gereksiz bekletebilir |
 
-İlk pilot için kısa blocking retry önerilir. Backoff toplamı dakikaları aşacaksa Spring Kafka retry topic pattern'i (`retry-1m`, `retry-5m`, sonrasında DLQ gibi) ayrı tasarlanmalıdır.
+İlk pilot için kısa blocking retry önerilir. Backoff toplamı dakikaları aşacaksa Spring Kafka retry topic pattern'i (`retry-1m`, `retry-5m`, sonrasında DLQ gibi) ayrı bir sonraki faz olarak tasarlanmalıdır.
 
 ### DLQ Topic Kuralı
 
@@ -129,30 +129,78 @@ Eğer platform topic isimlerinde suffix kullanımına izin vermiyorsa `app.dlq.t
 
 ---
 
-## Fazlı Plan
+## Fazlı Yol Haritası
 
-### Faz 1: SNS Pilot
+Bu iş tek seferde "büyük Kafka platform değişikliği" olarak yapılmamalıdır. En güvenli sıra: önce davranışı anlamak, sonra sessiz kaybı bitirmek, sonra operasyon ve replay kabiliyetini kontrollü şekilde büyütmektir.
 
-- [ ] `cmd-adaptor-sns` içinde DLQ configuration property'lerini ekle.
-- [ ] Retry policy tanımla: max attempt, exponential backoff, retryable/non-retryable exception listesi.
-- [ ] `KafkaSourceListener` ve `KafkaLookupEoriListener` içindeki hata yutan `try/catch` pattern'ini kaldır veya rethrow edecek şekilde değiştir.
+### Faz 0: Architecture Discovery
+
+Davranış değiştirmeden kanıt topla.
+
+- [ ] Offset commit semantiğini doğrula: başarı, retry exhausted, DLQ publish success/failure durumlarında offset ne oluyor?
+- [ ] CDLZ cluster vs adaptor cluster ayrımını netleştir; DLQ topic ve `KafkaTemplate` hangi cluster'da olacak?
+- [ ] CDLZ consumer factory'nin `ErrorHandlingDeserializer` kullanıp kullanmadığını doğrula.
+- [ ] EORI akışında partial success ve duplicate etkisini analiz et.
+- [ ] Retryable/non-retryable exception taxonomy'sini yaz.
+
+Çıkış kriteri: error taxonomy, offset commit kararı, DLQ cluster kararı ve EORI idempotency kararı dokümante edilmiş olmalı.
+
+### Faz 1: No Silent Loss SNS Pilot
+
+Amaç sadece sessiz veri kaybını durdurmaktır; retry topic ve reprocessor bu faza dahil edilmemelidir.
+
+- [ ] `try/catch + log.error` pattern'ini kaldır veya exception'ı rethrow et.
 - [ ] Producer send future'larını bekleyerek async send hatalarını görünür yap.
-- [ ] `DefaultErrorHandler` ve `DeadLetterPublishingRecoverer` ile retry + DLQ davranışını konfigüre et.
-- [ ] DLQ payload serializer'ının `GenericRecord` ve `CdlzLandingRecord` için çalıştığını doğrula.
-- [ ] Unit testlerde listener'ın exception'ı yutmadığını ve error handler bean'inin yüklendiğini doğrula.
-- [ ] Mevcut docker-compose entegrasyon profiline DLQ senaryosu ekle.
+- [ ] Kısa blocking retry ekle: max retry, exponential backoff, non-retryable fast-path.
+- [ ] Retry exhausted sonrası original consumed record'u DLQ'ye gönder.
+- [ ] DLQ publish failure için critical metric/alert ekle.
+- [ ] Unit ve docker-compose entegrasyon testleriyle silent loss'un bittiğini doğrula.
 
-### Faz 2: Monitoring ve Runbook
+Çıkış kriteri: kayıt ya başarıyla işlenir ya retry edilir ya da DLQ'ye korunarak gider; `log.error` ile sessiz kayıp kalmaz.
 
-- [ ] `fdp.dlq.messages.total` ve `fdp.kafka.listener.retry.total` benzeri metric'leri ekle.
-- [ ] Dynatrace/Prometheus dashboard ve alert threshold'larını tanımla.
-- [ ] Runbook'u gerçek topic isimleri, alert adları ve manuel replay prosedürüyle güncelle.
+### Faz 2: Operational Hardening
 
-### Faz 3: Kontrollü Reprocessing
+Sistemi production'da işletilebilir hale getir.
 
-- [ ] Manuel replay prosedürü yeterli değilse ayrı bir DLQ reprocessor tasarla.
-- [ ] Reprocessing için audit log, yetki kontrolü, dry-run ve rate limit ekle.
-- [ ] EORI listener'da çoklu output send nedeniyle partial success/duplicate riskini ayrıca ele al.
+- [ ] Retry count, retry exhausted, DLQ count, DLQ publish failure metric'lerini dashboard'a ekle.
+- [ ] Consumer lag ve retry spike alert'lerini tanımla.
+- [ ] Runbook'u gerçek topic, cluster, ACL ve serializer kontrolleriyle tamamla.
+- [ ] DLQ inceleme prosedürünü ve incident kaydı formatını netleştir.
+- [ ] Schema evolution ve schema mismatch kararlarını runbook'a bağla.
+
+Çıkış kriteri: ekip bir DLQ/retry olayını 5 dakika içinde fark edip doğru prosedürü izleyebilmeli.
+
+### Faz 3: Retry Topic Pattern
+
+Bunu yalnızca evidence varsa ekle.
+
+- [ ] Blocking retry partition lag yaratıyor mu ölç.
+- [ ] Downstream kesintilerinin dakika seviyesinde bekleme gerektirip gerektirmediğini doğrula.
+- [ ] Gerekirse `retry-1m`, `retry-5m`, `retry-30m`, final DLQ topic zincirini tasarla.
+- [ ] Her retry topic için ACL, retention, monitoring ve ownership tanımla.
+
+Çıkış kriteri: retry topic pattern'i yalnızca blocking retry'nin yetmediği kanıtlanırsa uygulanır.
+
+### Faz 4: Controlled Reprocessing
+
+Replay otomasyonu en son gelmelidir; yanlış replay ikinci incident yaratabilir.
+
+- [ ] Dry-run, offset range, rate limit, audit log ve yetki kontrolü olmadan reprocessor yazma.
+- [ ] Replay reason, actor, timestamp ve replay sonucu audit trail'e yazılmalı.
+- [ ] EORI duplicate etkisi çözülmeden bulk replay açılmamalı.
+
+Çıkış kriteri: replay kontrollü, izlenebilir ve geri dönüş etkisi analiz edilmiş şekilde yapılabilir.
+
+### Faz 5: Platform Standardization
+
+SNS pilot başarılı olduktan sonra pattern ortak hale getirilebilir.
+
+- [ ] Ortak retry/DLQ config modelini `fdp-commons` veya shared template olarak tasarla.
+- [ ] Ortak metric, header, runbook ve dashboard standardı oluştur.
+- [ ] Diğer adaptörleri aynı taxonomy ve phase gate'lerle onboard et.
+- [ ] Schema compatibility ve DLQ governance'ı platform standardına ekle.
+
+Çıkış kriteri: SNS'e özel çözüm değil, FDP adaptörleri için tekrar edilebilir failure-management standardı oluşur.
 
 ---
 

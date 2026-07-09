@@ -14,6 +14,23 @@
 
 ---
 
+## Implementation Order by Phase
+
+The main implementation scope of this guide is **Phase 1: No Silent Loss SNS Pilot**. Do not start Phase 1 before Phase 0 discovery is complete.
+
+| Phase | Where it appears in this guide |
+|-------|--------------------------------|
+| Phase 0: Discovery | Preconditions, cluster decision, deserializer verification, EORI idempotency decision |
+| Phase 1: No Silent Loss | Configuration, error handler, short blocking retry, listener changes, topic provisioning, core tests |
+| Phase 2: Operational Hardening | Monitoring, alerts, runbook, and DLQ inspection procedure |
+| Phase 3: Retry Topic Pattern | Not implemented in this guide; design separately after lag/downstream outage evidence |
+| Phase 4: Controlled Reprocessing | Not implemented in this guide; do not start without dry-run/audit/RBAC/rate limits |
+| Phase 5: Platform Standard | Address when the SNS pilot is promoted into `fdp-commons` or a shared template |
+
+Retry topics and reprocessor tooling should not be added to Phase 1. The first win is ensuring a message can no longer disappear silently.
+
+---
+
 ## 1. Add Configuration
 
 `cmd-adaptor-sns/src/main/resources/application.yml`:

@@ -129,7 +129,7 @@ Retry is a separate decision point from DLQ. The goal is to recover transient fa
 | Retry-topic pattern | Minute-level delay or downstream outage | Requires extra topics, ACLs, retention, and monitoring |
 | DLQ fast path | Schema/serialization/permanent business validation failures | Retrying the same record will not help |
 
-For the first SNS pilot, use blocking consumer retry: for example 3 retries, 1 second initial interval, 2x multiplier, and 30 seconds max interval. If total wait time becomes operationally too long, or downstream outages require minute-level waiting, design a retry-topic pattern in Phase 2.
+For the first SNS pilot, use blocking consumer retry: for example 3 retries, 1 second initial interval, 2x multiplier, and 30 seconds max interval. If total wait time becomes operationally too long, or downstream outages require minute-level waiting, design a retry-topic pattern in Phase 3.
 
 Exception classification should be explicit:
 
@@ -138,6 +138,21 @@ Exception classification should be explicit:
 | Retryable | `TimeoutException`, temporary broker/network failures, temporary schema registry access failure | Exponential backoff retry |
 | Non-retryable | Deserialization, incompatible schema, permanent payload validation failure | DLQ fast path |
 | Needs review | EORI multi-send partial failure | Do not use aggressive retry until idempotency/duplicate strategy is clear |
+
+---
+
+## Architecture Decisions by Phase
+
+| Phase | Architecture decision | Not done in this phase |
+|-------|-----------------------|------------------------|
+| Phase 0: Discovery | Confirm offset commit, CDLZ/adaptor cluster split, `ErrorHandlingDeserializer`, EORI duplicate impact, and exception taxonomy | No runtime behavior changes |
+| Phase 1: No Silent Loss | Implement short blocking retry, DLQ, DLQ publish failure alerting, and listener exception propagation | No retry topics, reprocessor, or bulk replay |
+| Phase 2: Operational Hardening | Complete dashboards, alerts, runbook, DLQ inspection procedure, and schema mismatch operating decision | No new retry topology |
+| Phase 3: Retry Topic Pattern | Design retry topic chain only if lag/downstream outage evidence exists | Do not grow blocking retry without evidence |
+| Phase 4: Controlled Reprocessing | Design replay with dry-run, offset range, audit, RBAC, and rate limits | No uncontrolled API or bulk replay |
+| Phase 5: Platform Standard | Turn the SNS pilot into shared config/header/metric/runbook standards | Do not copy to other adaptors without validation |
+
+This sequence captures the critical safety gain in Phase 1 while delaying riskier automation until measurement and operational discipline exist.
 
 ---
 

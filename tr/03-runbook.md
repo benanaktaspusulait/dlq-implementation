@@ -21,6 +21,21 @@ Bu runbook, Kafka retry ve DLQ implementasyonu devreye alındıktan sonra kullan
 
 ---
 
+## Fazlara Göre Operasyon Modeli
+
+| Faz | Operasyon beklentisi |
+|-----|----------------------|
+| Faz 0: Discovery | Runbook sadece kararları kaydeder; production davranışı değişmez |
+| Faz 1: No Silent Loss | Retry/DLQ alertleri izlenir; replay otomasyonu yoktur, DLQ kayıtları silinmez |
+| Faz 2: Operational Hardening | Dashboard, alert threshold, DLQ inspect ve incident prosedürü aktif kullanılır |
+| Faz 3: Retry Topic Pattern | Retry topic lag, retention ve ownership ayrıca izlenir |
+| Faz 4: Controlled Reprocessing | Replay yalnızca dry-run, onay, audit ve rate limit ile yapılır |
+| Faz 5: Platform Standard | Aynı runbook pattern'i diğer adaptörlere standardize edilir |
+
+Faz 1'de bir DLQ mesajı oluşursa doğru aksiyon hemen replay yapmak değildir; önce root cause, duplicate etkisi ve schema/serializer durumu doğrulanmalıdır.
+
+---
+
 ## DLQ Topic'leri
 
 | Akış | Source topic | DLQ topic |
@@ -159,7 +174,11 @@ Kontrol listesi:
 - [ ] Listener içinde exception yutuluyor mu?
 - [ ] `KafkaTemplate.send()` future'ı bekleniyor mu?
 - [ ] `DefaultErrorHandler` listener container factory'ye bağlandı mı?
-- [ ] DLQ topic mevcut mu?
+- [ ] `app.dlq.enabled=true` mi? (`false` iken `DlqConfig` bean'i oluşturulmaz.)
+- [ ] Deserialization/schema hataları için consumer `ErrorHandlingDeserializer` kullanıyor mu? Kullanmıyorsa bu hatalar poll döngüsünü kırar ve error handler'a ya da DLQ'ye hiç ulaşmaz.
+- [ ] DLQ topic, source topic'lerin tüketildiği **CDLZ cluster**'ında mı mevcut (adaptör cluster'ında değil)?
+- [ ] DLQ `KafkaTemplate` CDLZ cluster'ına ve schema registry'sine yönlendirilmiş mi?
+- [ ] DLQ topic source kadar (ya da daha fazla) partition'a sahip mi (ya da recoverer partition `-1` mi kullanıyor)?
 - [ ] DLQ producer serializer doğru mu?
 - [ ] ACL produce izni var mı?
 

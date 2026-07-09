@@ -129,7 +129,7 @@ Retry, DLQ'den ayrı bir karar noktasıdır. Hedef, transient hataları DLQ üre
 | Retry topic pattern | Dakikalar seviyesinde bekleme veya downstream outage | Ek topic, ACL, retention ve monitoring gerekir |
 | DLQ fast-path | Schema/serialization/kalıcı business validation hataları | Aynı kaydı tekrar denemek fayda sağlamaz |
 
-İlk SNS pilotu için öneri blocking consumer retry'dır: örneğin 3 retry, 1 saniye başlangıç, 2x multiplier, 30 saniye maksimum interval. Eğer toplam bekleme süresi operasyonel olarak kabul edilemeyecek kadar uzarsa veya downstream kesintileri dakikalar seviyesinde bekleniyorsa Faz 2'de retry topic pattern'i tasarlanmalıdır.
+İlk SNS pilotu için öneri blocking consumer retry'dır: örneğin 3 retry, 1 saniye başlangıç, 2x multiplier, 30 saniye maksimum interval. Eğer toplam bekleme süresi operasyonel olarak kabul edilemeyecek kadar uzarsa veya downstream kesintileri dakikalar seviyesinde bekleniyorsa Faz 3'te retry topic pattern'i tasarlanmalıdır.
 
 Exception sınıflandırması açık olmalıdır:
 
@@ -138,6 +138,21 @@ Exception sınıflandırması açık olmalıdır:
 | Retryable | `TimeoutException`, geçici broker/network hataları, schema registry geçici erişim hatası | Exponential backoff retry |
 | Non-retryable | Deserialization, uyumsuz schema, kalıcı payload validation hatası | DLQ fast-path |
 | İncelenecek | EORI multi-send partial failure | Idempotency/duplicate stratejisi netleşmeden agresif retry yapma |
+
+---
+
+## Fazlara Göre Mimari Kararlar
+
+| Faz | Mimari karar | Bu fazda yapılmayanlar |
+|-----|--------------|------------------------|
+| Faz 0: Discovery | Offset commit, CDLZ/adaptor cluster ayrımı, `ErrorHandlingDeserializer`, EORI duplicate etkisi ve exception taxonomy doğrulanır | Runtime davranışı değiştirilmez |
+| Faz 1: No Silent Loss | Kısa blocking retry, DLQ, DLQ publish failure alert ve listener exception propagation uygulanır | Retry topic, reprocessor, bulk replay yok |
+| Faz 2: Operational Hardening | Dashboard, alert, runbook, DLQ inspect prosedürü ve schema mismatch operasyon kararı tamamlanır | Yeni retry topolojisi eklenmez |
+| Faz 3: Retry Topic Pattern | Sadece lag/downstream outage kanıtı varsa retry topic zinciri tasarlanır | Kanıt yoksa blocking retry büyütülmez |
+| Faz 4: Controlled Reprocessing | Dry-run, offset range, audit, RBAC ve rate limit içeren replay modeli tasarlanır | Kontrolsüz API veya bulk replay yok |
+| Faz 5: Platform Standard | SNS pilotu ortak config/header/metric/runbook standardına dönüştürülür | Diğer adaptörlere doğrulamadan kopyalanmaz |
+
+Bu sıralama, kritik güvenlik kazanımını Faz 1'de alırken daha riskli otomasyonları ölçüm ve operasyon disiplini sonrasına bırakır.
 
 ---
 

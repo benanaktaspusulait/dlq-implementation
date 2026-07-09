@@ -14,6 +14,23 @@
 
 ---
 
+## Fazlara Göre Uygulama Sırası
+
+Bu kılavuzun ana uygulama kapsamı **Faz 1: No Silent Loss SNS Pilot** içindir. Faz 0 discovery tamamlanmadan Faz 1'e başlanmamalıdır.
+
+| Faz | Bu kılavuzdaki karşılığı |
+|-----|--------------------------|
+| Faz 0: Discovery | Ön koşullar, cluster kararı, deserializer doğrulaması, EORI idempotency kararı |
+| Faz 1: No Silent Loss | Konfigürasyon, error handler, kısa blocking retry, listener değişikliği, topic provisioning, temel testler |
+| Faz 2: Operational Hardening | Monitoring, alert, runbook ve DLQ inspect prosedürü |
+| Faz 3: Retry Topic Pattern | Bu kılavuzda uygulanmaz; lag/downstream outage kanıtı sonrası ayrı tasarlanır |
+| Faz 4: Controlled Reprocessing | Bu kılavuzda uygulanmaz; dry-run/audit/RBAC/rate limit olmadan başlanmaz |
+| Faz 5: Platform Standard | SNS pilot sonucu `fdp-commons` veya shared template'e taşınırken ele alınır |
+
+Özellikle retry topic ve reprocessor Faz 1'e eklenmemelidir. İlk kazanım, mesajın sessizce kaybolmamasıdır.
+
+---
+
 ## 1. Konfigürasyon Ekle
 
 `cmd-adaptor-sns/src/main/resources/application.yml`:

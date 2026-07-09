@@ -104,7 +104,7 @@ This uses Spring Kafka listener retry and recovery behavior without building a f
 | Permanent business validation failure | DLQ | Requires data or code correction |
 | Long downstream outage | Consider retry-topic pattern | Long blocking retries can hold a partition unnecessarily |
 
-For the first pilot, use short blocking retry. If total backoff would stretch into minutes, design a Spring Kafka retry-topic pattern (`retry-1m`, `retry-5m`, then DLQ) separately.
+For the first pilot, use short blocking retry. If total backoff would stretch into minutes, design a Spring Kafka retry-topic pattern (`retry-1m`, `retry-5m`, then DLQ) as a later phase.
 
 ### DLQ Topic Rule
 
@@ -129,30 +129,78 @@ If the platform does not allow runtime suffix conventions, provide explicit `app
 
 ---
 
-## Phased Plan
+## Phased Roadmap
 
-### Phase 1: SNS Pilot
+This should not be delivered as one large Kafka platform change. The safer order is to understand current behavior, stop silent loss, then grow operational and replay capability in controlled steps.
 
-- [ ] Add DLQ configuration properties in `cmd-adaptor-sns`.
-- [ ] Define retry policy: max attempts, exponential backoff, retryable/non-retryable exception list.
-- [ ] Remove or rethrow the failure-swallowing `try/catch` pattern in `KafkaSourceListener` and `KafkaLookupEoriListener`.
-- [ ] Await producer send futures so async send failures are visible.
-- [ ] Configure retry + DLQ using `DefaultErrorHandler` and `DeadLetterPublishingRecoverer`.
-- [ ] Verify the DLQ payload serializer works for `GenericRecord` and `CdlzLandingRecord`.
-- [ ] Unit test that listeners do not swallow exceptions and the error-handler bean is loaded.
-- [ ] Add a DLQ scenario to the existing docker-compose integration profile.
+### Phase 0: Architecture Discovery
 
-### Phase 2: Monitoring and Runbook
+Collect evidence without changing runtime behavior.
 
-- [ ] Add metrics such as `fdp.dlq.messages.total` and `fdp.kafka.listener.retry.total`.
-- [ ] Define Dynatrace/Prometheus dashboards and alert thresholds.
-- [ ] Update the runbook with real topic names, alert names, and the manual replay process.
+- [ ] Confirm offset commit semantics for success, retry exhausted, DLQ publish success, and DLQ publish failure.
+- [ ] Confirm the CDLZ cluster vs adaptor cluster split; decide where DLQ topics and the DLQ `KafkaTemplate` live.
+- [ ] Verify whether the CDLZ consumer factory uses `ErrorHandlingDeserializer`.
+- [ ] Analyze EORI partial-success and duplicate impact.
+- [ ] Write the retryable/non-retryable exception taxonomy.
 
-### Phase 3: Controlled Reprocessing
+Exit criteria: error taxonomy, offset commit decision, DLQ cluster decision, and EORI idempotency decision are documented.
 
-- [ ] Design a dedicated DLQ reprocessor if manual replay is not enough.
-- [ ] Add audit logging, authorization, dry-run, and rate limiting.
-- [ ] Address the partial-success/duplicate risk in the EORI listener's multi-send path.
+### Phase 1: No Silent Loss SNS Pilot
+
+The goal is only to stop silent data loss; retry topics and reprocessor tooling are deliberately out of scope.
+
+- [ ] Remove `try/catch + log.error` or rethrow exceptions.
+- [ ] Await producer send futures so async send failures become visible.
+- [ ] Add short blocking retry: max retry, exponential backoff, non-retryable fast path.
+- [ ] Send the original consumed record to DLQ after retries are exhausted.
+- [ ] Add critical metric/alert for DLQ publish failure.
+- [ ] Prove with unit and docker-compose integration tests that silent loss is gone.
+
+Exit criteria: a record is either processed, retried, or preserved in DLQ; no silent `log.error` loss remains.
+
+### Phase 2: Operational Hardening
+
+Make the system operable in production.
+
+- [ ] Add retry count, retry exhausted, DLQ count, and DLQ publish failure metrics to dashboards.
+- [ ] Define consumer lag and retry spike alerts.
+- [ ] Complete the runbook with real topic, cluster, ACL, and serializer checks.
+- [ ] Define DLQ inspection procedure and incident record format.
+- [ ] Tie schema evolution and schema mismatch decisions into the runbook.
+
+Exit criteria: the team can detect a retry/DLQ event within 5 minutes and follow the right procedure.
+
+### Phase 3: Retry Topic Pattern
+
+Add this only if there is evidence.
+
+- [ ] Measure whether blocking retry causes partition lag.
+- [ ] Confirm whether downstream outages require minute-level waiting.
+- [ ] If needed, design `retry-1m`, `retry-5m`, `retry-30m`, final DLQ topic chain.
+- [ ] Define ACLs, retention, monitoring, and ownership for every retry topic.
+
+Exit criteria: retry topics are implemented only when blocking retry is proven insufficient.
+
+### Phase 4: Controlled Reprocessing
+
+Replay automation should come late; incorrect replay can create a second incident.
+
+- [ ] Do not build a reprocessor without dry-run, offset range, rate limit, audit log, and authorization.
+- [ ] Write replay reason, actor, timestamp, and result to an audit trail.
+- [ ] Do not enable bulk replay until EORI duplicate impact is resolved.
+
+Exit criteria: replay can be performed in a controlled, auditable, impact-aware way.
+
+### Phase 5: Platform Standardization
+
+After the SNS pilot succeeds, make the pattern reusable.
+
+- [ ] Design shared retry/DLQ config in `fdp-commons` or a shared template.
+- [ ] Standardize metrics, headers, runbook, and dashboard conventions.
+- [ ] Onboard other adaptors through the same taxonomy and phase gates.
+- [ ] Add schema compatibility and DLQ governance to the platform standard.
+
+Exit criteria: this is no longer an SNS-specific fix but a repeatable FDP adaptor failure-management standard.
 
 ---
 
@@ -167,6 +215,9 @@ If the platform does not allow runtime suffix conventions, provide explicit `app
 | Wrong DLQ serializer | DLQ publish also fails | Add Avro serializer integration test for DLQ |
 | EORI partial output | Retry may duplicate lookup records | Define idempotent keys, transactional send, or duplicate handling |
 | Wrong DLQ topic naming | Operations cannot find records | Use explicit consumed-topic-to-DLQ mapping |
+| DLQ produced to the wrong cluster | Records consumed from the CDLZ cluster cannot be republished/found | Point the DLQ topics and DLQ `KafkaTemplate` at the CDLZ cluster (`FDP_APP_CDL_KAFKA_BROKER`), not the adaptor cluster |
+| Deserialization failures bypass the handler | Poison/schema failures stall the poll loop and never reach the DLQ | Wrap consumer Avro deserializers in `ErrorHandlingDeserializer` (in `fdp-commons`) |
+| `app.dlq.enabled` flag not wired to a bean | Rollback via the flag has no effect | Gate `DlqConfig` with `@ConditionalOnProperty` on `app.dlq.enabled` |
 
 ---
 

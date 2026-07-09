@@ -21,6 +21,21 @@ This runbook describes the operational procedure after Kafka retry and DLQ imple
 
 ---
 
+## Operating Model by Phase
+
+| Phase | Operational expectation |
+|-------|-------------------------|
+| Phase 0: Discovery | Runbook records decisions only; production behavior does not change |
+| Phase 1: No Silent Loss | Retry/DLQ alerts are monitored; no replay automation exists, and DLQ records are not deleted |
+| Phase 2: Operational Hardening | Dashboards, alert thresholds, DLQ inspection, and incident procedure are actively used |
+| Phase 3: Retry Topic Pattern | Retry topic lag, retention, and ownership are monitored separately |
+| Phase 4: Controlled Reprocessing | Replay happens only with dry-run, approval, audit, and rate limits |
+| Phase 5: Platform Standard | The same runbook pattern is standardized across other adaptors |
+
+In Phase 1, a DLQ message does not mean "replay immediately"; first confirm root cause, duplicate impact, and schema/serializer state.
+
+---
+
 ## DLQ Topics
 
 | Flow | Source topic | DLQ topic |
