@@ -117,6 +117,8 @@ The DLQ topic should be tied to the topic consumed by the listener, not to the o
 
 If the platform does not allow runtime suffix conventions, provide explicit `app.dlq.topics.source` and `app.dlq.topics.eori` properties.
 
+Both consumed topics live on the **CDLZ cluster** (`app.cdlz-kafka`, `FDP_APP_CDL_KAFKA_BROKER`), which is separate from the adaptor's own `app.kafka` cluster (`FDP_KAFKA_BROKER`). The DLQ topics above, and the `KafkaTemplate` used by `DeadLetterPublishingRecoverer`, must be provisioned and configured against the CDLZ cluster, not the adaptor cluster.
+
 ---
 
 ## Solution Options
